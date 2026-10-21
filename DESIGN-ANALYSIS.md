@@ -361,12 +361,28 @@ pure out-of-tree tax. Upstreaming would delete most of it.
 2. **`cct[]` is a single point of failure** with no visible redundancy. A second
    copy of the table — or even just the current epoch's entry, mirrored — costs
    256 KiB and removes the worst failure mode.
+
+   *Addendum (verified post-publication):* the superblock **does** already have a
+   backup copy near the end of the device (`mkspadfs.c:77`, found and validated by
+   `test_backup_superblock()` at `scksuper.c:166`), and fsck will offer to
+   `CREATE BACKUP SUPERBLOCK?` if it is missing. The crash-count table has **no**
+   such copy — it is written exactly once at `cct_sector` (`mkspadfs.c:516`). So
+   the asymmetry is narrower than stated, and more importantly: **a redundancy
+   pattern already exists in this codebase to follow.** Mirroring `cct` is not
+   inventing new machinery, it is applying a precedent the format already uses.
 3. **File size in the directory block** → append dirties the parent dir; contention
    on hot directories. Prealloc mitigates, does not solve.
 4. **Hash quality unverified.** `*15` plus low-bits-first is a known-weak
    combination at the level that matters most. Benchmark before trusting.
 5. **No ordered iteration.** Structural, not fixable without a second index.
 6. **2^16 crash-count ceiling.** Real operational cliff; needs fsck to clear.
+
+   *Correction (verified post-publication):* this is **already mitigated**.
+   `fix_cct()` (`sckcct.c:99-133`) handles an invalid table, can allocate a
+   **new** crash-count table at a different location, and `--reset-crash-counts`
+   zeroes the table and resets `tx.cc` to 0. The residual risk is *operational*
+   — reaching the ceiling without noticing — not structural. Downgraded from a
+   format concern to a monitoring/warning task.
 7. **172-char symlink cap.** Arbitrary consequence of EA sizing.
 8. **No sparse files.** Documented and deliberate, but a real gap for VM images,
    databases, and git.
