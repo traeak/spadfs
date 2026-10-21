@@ -1,0 +1,23 @@
+*.cmd
+# Machine-specific absolute paths; regenerate locally, never publish.
+compile_commands.json
+compile_flags.txt
+*.ko
+*.ko.unsigned
+*.mod.c
+*.o
+*.swp
+.*.d
+.*.tmp
+.cache.mk
+.tmp_versions
+Module.markers
+Module.symvers
+built-in.a
+# Leading slash: the built binary at repo root only, NOT the utils/mkspadfs/ source dir.
+/mkspadfs
+modules.builtin
+modules.order
+spadfs.mod
+# Leading slash: the built binary at repo root only, NOT the utils/spadfsck/ source dir.
+/spadfsck

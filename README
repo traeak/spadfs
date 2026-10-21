@@ -1,0 +1,350 @@
+Using SPAD filesystem driver for Linux
+======================================
+
+> **Attribution.** SpadFS was designed and written by **Mikuláš Patočka**
+> (Mikulas Patocka), as his PhD thesis. This repository is an unofficial mirror
+> maintained by someone else and claims no authorship of the SpadFS code. See
+> [`CREDITS`](CREDITS) for details, and [`DESIGN-ANALYSIS.md`](DESIGN-ANALYSIS.md)
+> for third-party analysis of the design.
+>
+> **⚠️ License — UNRESOLVED.** No license has been granted for this code.
+> [`LICENSE`](LICENSE) is a **status notice, not a license**. The only signal in
+> the source is `MODULE_LICENSE("GPL")` (`super.c:2058`), which covers the kernel
+> module only — the userspace tools under `utils/` carry no license statement at
+> all. Do not use, modify, or redistribute until terms are confirmed directly with
+> the author.
+
+Requirements
+------------
+
+Linux kernel 2.6 with modules enabled.
+Block device with size from 16MB to 2^57 bytes.
+Disk that can atomically write one sector (512 bytes) so that the sector
+contains either old or new content in case of crash.
+
+Features
+--------
+
+- Uses crash counts to maintain consistency across crashes instead of
+  journaling.
+- 48-bit sector numbers. Block size from 512B to machine page size.
+- Large directories are organized in hashed structure similar to Fagin's
+  extendible hashing. No btrees.
+- Files without hardlinks and with at most 2 fragments are embedded directly in
+  the directory, saving one seek on open operation.
+- Fragmented files are organized in trees of indirect blocks of increasing
+  depths, like on classical Unix filesystem, except that they contain extents
+  instead of blocks.
+- Free space is described in free block runs, forming a sorted linked list.
+  Average lookup/add/delete complexity in such allocation page is sqrt(n). When
+  this structure overflows, it is split. When free space is too fragmented, this
+  structure is converted to bitmap.
+
+Compiling & installation
+------------------------
+
+If you are using a kernel from Debian-based distribution, install the package
+linux-headers-amd64 (replace "amd64" with the name of your architecture).
+
+If you are using a kernel from RPM-based distribution, install the package
+kernel-devel.
+
+If you are using a kernel that you compiled on your own, make sure that you have
+the kernel source available and that the directory "/lib/modules/$(shell uname
+-r)/build" points to your kernel source.
+
+Optionally, set KERNELDIR in Makefile to path of your current kernel source or
+build subdirectory in modules directory. By default path is taken from uname -r
+command:
+KERNELDIR := /lib/modules/$(shell uname -r)/build
+
+Type make
+
+Type make install (or copy files mkspadfs and spadfsck somewhere in your path
+and copy spadfs.ko somewhere in your module path).
+
+Insert the filesystem driver with command insmod spadfs.ko
+Create new filesystem on a block device with mkspadfs /dev/device
+Mount it with mount -t spadfs /dev/device /mnt/mountpoint
+
+Compiling into the kernel
+-------------------------
+
+Apply the patch spadfs.patch to the kernel souce (you may need to change it a
+little bit if you use older kernel). Create the directory fs/spadfs in the
+kernel tree and copy all these files there. Run "make menuconfig" and SpadFS
+should appear in the list of filesystems.
+
+Parameters
+==========
+
+mkspadfs [parameters] device_name [size]
+----------------------------------------
+
+If size is not specified, mkspadfs detects it. Size can have suffix 'K', 'M',
+'G', 'T' which means that the number is in KiBs, MiBs, GiBs or TiBs.
+
+--no-trim
+	Do not discard the content of the block device
+
+--trim
+	Discard the content of the block device
+
+--no-checksums
+	Turns off checksums on metadata
+	- can be overridden with mount option
+
+--checksums
+	Turns on checksums on metadata (default)
+	- can be overridden with mount option
+
+--block-size <number>
+	Block size, minimum is 512B, maximum is 64KiB. The real maximum that can
+	be accessed by the kernel is page size of a machine.
+	default: page size of a machine (or fnode-size or page-size if they are
+		smaller)
+
+--fnode-size <number>
+	Size of directory until the filesystem starts to split it to hash pages.
+	It must be >= block-size and <= page-size.
+	default: 8KiB (or block-size if block-size > 8KiB or page-size if
+		page-size < 8KiB)
+
+--page-size <number>
+	Size of page with allocation information and size of directory hash
+	page. It must be >= block-size and >= fnode-size. It can be at most
+	128KiB.
+	default: 32KiB (or fnode-size or block-size if they are larger)
+
+--cluster-size <number>
+	Files larger than threshold are allocated in different zone in multiples
+	of this value to prevent fragmentation. It must be >= block-size.
+	default: 32KiB
+
+--cluster-threshold <number>
+	Threshold for using cluster size.
+	default: 128KiB (or cluster-size * 4)
+
+--group-size <number>
+	Size of an allocation group. This has nothing to do with layout of
+	allocation information, groups are purely "virtual" --- they are kept
+	only in kernel memory. Their purpose is to keep down fragmentation.
+	default: 1/512 of a device size
+
+--metadata-group-size <number>
+	Size of a zone for metadata. Rounded to multiply of group-size.
+	default: 1/64 of a device size
+
+--smallfile-group-size <number>
+	Size of a zone for files smaller than cluster-threshold. Rounded to
+	multiply of group-size.  The rest of a device is used for larger files.
+	default: 1/8 of a device size
+
+--reserve <number>
+	The amount of space reserved for root (in bytes).
+	default: 2% - 0.5%
+
+--
+	No more options past this point, use if your device name begins with -.
+
+spadfsck [parameters] device_name
+---------------------------------
+
+Spadfsck need not to be invoked after crash because filesystem manages
+consistency of data using crash counts. It should be however invoked if block
+device is damaged.
+
+-a
+-y
+	Assume 'y' on all questions (except the dangerous ones, such as
+	truncating the filesystem when part of a device is inaccessible).
+
+-p
+	Like 'y', but don't do some potentially destructive operations. This is
+	used when running spadfsck automatically on each boot.
+
+-n
+	Open device in read-only mode. Do not fix it, just print messages about
+	errors.
+
+-f
+	Force checking even if there are no errors on filesystem.
+
+-r
+	Nothing. For compatibility with e2fsck.
+
+--mark
+	Mark the filesystem for checking on next reboot. This flag is
+	automatically assumed when the user attempts to run spadfsck on mounted
+	filesystem.
+
+--extend
+	Extend the filesystem. You first need to extend the block device (for
+	example with lvextend command) and then you run spadfsck with --extend
+	flag to extend the file system.
+
+--set-reserve <number>
+	Set the number of bytes reserved for root to the specified value.
+
+--memory <number>
+	Memory limit (in bytes or megabytes) for spadfsck. It caches previously
+	read data until this fills up.
+	default: 1/2 of available memory
+
+--swapfile <file>
+	Store free blocks bitmap to a specified file. Normally spadfsck stores
+	the bitmap in memory (with compressed long runs of 0s and 1s). When it
+	grows above memory limit, it throws it on disk into unused parts of
+	apages. When the apages are damaged, it has nowhere to store its
+	information and its memory consumption can grow. This specifies a file
+	on another mounted device (or raw partition) where block allocation
+	bitmap will be written during check. With this option, spadfsck can
+	check very large filesystems without too much memory consumption.
+
+--log <file>
+	Write log to a specified file (on different, mounted filesystem).
+
+--sync-writes
+	Do fsync after each write.
+
+--rebuild-apages
+	Rebuild allocation pages unconditionally.
+
+--reset-crash-counts
+	Reset crash counts over the whole filesystem.
+
+--dont-store-cross-links
+	Normally, when spadfsck find cross-linked files, it stores information
+	about each clash in memory, so that it can print which files are
+	cross-linked. On a large filesystem this can consume memory proportional
+	to a filesystem size, so there's an option to disable it.
+
+--undelete
+	Attempt to undelete deleted directories.
+
+--undelete-scan-all
+	Scan the whole filesystem (including data area) when doing the undelete.
+
+--cache
+	Cache filesystem metadata in spadfsck memory. (default)
+
+--nocache
+	Do not cache filesystem metadata in memory (though they can still be
+	cached in buffers if you use --nodirect)
+
+--direct
+	Use direct I/O.
+
+--nodirect
+	Use buffered I/O. (default)
+
+--prefetch
+	Prefetch blocks that will likely be needed in the future. (default)
+
+--noprefetch
+	Do not prefetch blocks.
+
+Testing options:
+	These options are only for testing, they don't have a practical use.
+	They are enabled only if compiled with TESTCODE symbol defined.
+
+--recover-all-files
+	Delete and recover all files on a filesystem. (normally only erroneous
+	files are recovered)
+
+--recover-all-directories
+	Delete and recover all directories on a filesystem. (normally only
+	erroneous directories are recovered)
+
+--fragment-recovered-files
+	Intentionally create fragments in recovered files. (normally fragments
+	are created only when necessary)
+
+--move-recovered-files
+	Intentionally move content of recovered files. (normally files are moved
+	around only when resolving cross-link)
+
+--dont-sort-recovered-files
+	Don't sort files when recovering them.
+
+--make-apage-bitmaps
+	When recovering apages, create them as bitmaps.
+
+--always-swap
+	Always swap to apages.
+
+--debug-malloc
+	Check malloc/free calls, add redzone to a block end, check for memory
+	leaks when terminating.
+
+--
+	No more options past this point, use if your device name begins with -.
+
+Mount options
+-------------
+
+Specified with -o option=value or -o option syntax in mount command or fstab
+file.
+
+help
+	Display help, do not mount.
+
+uid=xxx
+	Set default uid of files that do not have UNX attribute.
+	(default 0)
+
+gid=xxx
+	Set default uid of files that do not have UNX attribute.
+	(default 0)
+
+umask=xxx
+	Set default mode of files that do not have UNX attribute.
+	(default is inversion of current process' umask)
+
+prealloc_part=xxx
+	Prealloc this fraction of an existing file size --- i.e. prealloc_part 8
+	means to preallocate 1/8 of file size on a write.
+	(default 8)
+
+prealloc_min=xxx
+	(default 4096)
+prealloc_max=xxx
+	Minimum and maximum values for preallocation in bytes. Real prealloc
+	will be portion of a file size (as specified with prealloc_part) pruned
+	into this interval.
+	Note: If you set prealloc_min >= cluster-threshold, you force all files
+	going to large file group (it may or may not be intended).
+	(default 1048576)
+
+xfer_size=xxx
+	Report optimal transfer size in st_blksize. cp and other applications
+	copy files in blocks of this size. (default page size)
+
+sync_time=xxx
+	Sync after this interval in seconds. (default is 2 minutes)
+
+no_checksums
+checksums
+	Don't or do make and check metadata checksums. Overrides mkspadfs
+	parameter.
+
+ino64=no/yes/force
+	Return 64-bit inode numbers. Unfortunatelly, it will break some 32-bit
+	userspace programs, thus it is not recommended when 32-bit userspace is
+	installed. The force makes all inode numbers greater than 2^32.
+usrquota
+grpquota
+	Use quotas.
+
+Limitations (likely not fixable)
+--------------------------------
+
+* Inode numbers may not be unique on 32-bit systems. This is Linux design
+  problem and it could be only fixed in kernel. On 64-bit systems, inode
+  numbers are unique.
+* Symlink length is limited to 172 characters.
+* No sparse files.
+* There isn't (and likely won't be) any support to open files by inode numbers
+  instead of path, for NFS servers.
+
+vim: textwidth=80

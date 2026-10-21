@@ -1,0 +1,189 @@
+Description of internals of SPAD filesystem
+===========================================
+
+Crash counts
+------------
+
+The filesystem doesn't use journaling, instead it has crash counts. They work in
+the following way:
+
+Filesystem has preallocated crash count table [disk_cct], when for each crash
+count (16 bit), it stores transaction count (32-bit). Filesystem has current
+crash count [disk_cc], that is incremented with each mount and decremented with
+each unmount (thus, it counts crashes).
+
+On mount, disk_cc is loaded to memory [memory_cc] and disk_cc is increased by
+one (but in memory old value is held). Also disk_cct is loaded to memory
+[memory_cct] and memory_cct at index memory_cc is increased by one.
+
+Directory entries and most other structures contain pair [cc, txc] of crash
+count (16-bit) and transaction count (32-bit). Directory entry is valid if
+cct[entry->cc] >= entry->txc --- if not valid, it skipped just as if it didn't
+exist when scanning directory. New entries are written with values (entry->cc =
+memory_cc, entry->txc = memory_cct). So they are seen as valid in current
+directory scans, but in case of crash, disk will contain one-less value:
+disk_cc[entry_cct] == entry->txc - 1, so they will be invalid. More entries can
+be atomically made valid by writing memory_cct to disk_cct.
+
+With some bit tricks, this test is used for atomic deletion of files as well or
+for atomic create-and-delete operation during rename --- the validity test is
+really (__s32)(cct[entry->cc] - entry->txc) >= 0 and the top bit of entry->txc
+is used to mark whether entry is scheduled for delete(1) or create(0).
+
+On sync, all metadata buffers are written, disk cache is flushed, memory_cct is
+written to disk and disk cache is flushed again. memory_cct[memory_cc] is then
+increased. If it would be greater or equal than 2^31, it is not increased and
+memory_cc is written to disk and memory_cc is increased.
+
+Allocation pages have two versions and (cc, txc) pair describing which one is
+valid --- they use the same validity test as above to make sure that allocation
+pages are consistent with directory structure.
+
+Clearing-up some misunderstanding of filesystem limits
+------------------------------------------------------
+
+There is no limit on 2^31 transactions. If transaction count overflows, new
+crash count is seamlessly used. The real limit on number of transactions is
+2^47. There is another limit on 2^16 crashes.
+
+Furthermore, the notion of transaction doesn't have the same meaning as in
+journaled filesystems. In journaled filesystems, transaction is one atomic
+change (for example allocate a file), in crash counts, many changes are batched
+into one transaction. New transaction is opened on these tree conditions:
+* sync or fsync
+* in periodic intervals (can be set), to make sure that unsynced data are
+  written sometimes
+* when the filesystem runs out of space and some blocks need to be freed
+
+So there is not really limit on 2^47 modifications, but on 2^47 syncs --- if the
+disk can perform sync in 10ms, the limit of 2^47 syncs would overflow in 44000
+years.
+
+Layout
+======
+
+Files & directories
+-------------------
+
+Filesystem has one allocation area used for both metadata and file content.
+File descriptors are embedded directly in directories, saving one seek on file
+opening or directory traversal. There is really only one important structure ---
+fnode_block --- which forms part of a directory.
+
+fnode_block has 512 bytes (but several these may be grouped together in a
+continuous area for a larger directory). fnode_block contains fnodes, each
+fnode contains file name, attributes, access times, size and first two extents
+(eventually pointer to another fnode_block in case it is directory). So the
+directory tree may only tree of fnode blocks, no other structures are required.
+
+Other structures:
+In case of a hardlink, special structure fixed_fnode_block is allocated and
+fnode is moved to it. Directory entries for this file contain only a dummy fnode
+that has filename, pointer to fixed_fnode_block and a flag meaning that it is
+hardlink.
+
+In case file has more than 2 extents, an anode structure is allocated --- it
+contains 20 direct extents and 10 indirect pointers of increasing depths (up to
+depth 10) just like classical Unix filesystem --- except that they contain
+extents, not array of blocks. Sparse files are not supported.
+
+If a directory is large, structure dnode is allocated that contains pointers to
+specific fnode_blocks. Lookup of a file is simple: file is hashed to 32-bit
+hash, first few hash bits are used to index array in dnode and file is found in
+corresponding fnode_block. If fnode_block overflows anyway, it is first split,
+and if it can't be split (there is only one pointer to this fnode_block in
+parent dnode), we allocate a dnode of a lower level, indexed by different bits
+in hash. If there are so many hash collisions that more dnodes can't be
+allocated anymore (i.e. all hash bits are used by some dnode --- i.e.
+log2(size_of_array_in_dnode)*dnode_tree_depth >= 32), the filesystem finally
+forms a chain of fnodes --- this is ineffective for lookup, but better than to
+give up.
+
+Extended attributes
+-------------------
+
+Each fnode can have up to 176 bytes of extended attributes. The attributes are
+identified by a name (3 bytes), length (1 byte) and content. Unlike in other
+filesystems, extended attributes are not meant to be changeable by the user, they
+are meant to be set by the filesystem driver to deal with specifics of a given
+operating systems. In this implementation, extended attribute 'UNX' contains
+features specific to unix --- mode, uid, gid and file prealloc. Additional
+extended attribute 'UNR' is created on block and char devices and contains rdev
+number. And attribute 'SYM' is created for symlinks.
+
+Extended attributes are formed and parsed in such a way, that filesystem driver
+and fsck skip unknown attributes, so that it is possible to add new features to
+the filesystem without breaking backward compatibility.
+
+Allocation structures
+---------------------
+
+Filesystem contains several structures called apage, each describing some
+variable range of its area. Apage contains a double-linked list of free extents
+--- struct apage_entry --- each contains starting sector and length of
+corresponding free area. Initially there is only one apage containing
+apage_entry for the whole disk. Double-linked list of apage_entries is sorted
+according to block number, however the entries are placed at any places in
+apage. Only the list is sorted, not entries' positions.
+
+This structure allows lookup/add/delete of apage_entries with average O(sqrt(n))
+complexity, where n is the size of apage: to find an apage_entry for a space
+near a specific sector, we select sqrt(n) entries at pseudorandom positions and
+choose the entry with highest sector number, but lower than requested. From this
+entry we walk the sorted list pointers until we find entry with greater than
+requested sector number. At average, we walk sqrt(n) entries.
+
+When the apage fills up, it is split. If it is too fragmented (such that bitmap
+would be more efficient than this list), it is converted to a bitmap. The
+filesystem keeps enough spare apages for the worst case scenario of free space
+fragmentation.
+
+There is a structure --- apage_index containing pointers to individual apages.
+It contains first pointers to used apages (with ranges corresponding to them)
+and finally spare apages.
+
+struct apage and apage_index have two versions and a (cc,txc) describing which
+one is valid. If the apage hasn't been modified since last sync and it is about
+to be modified, the active version is copied into the inactive version and
+(cc,txc) is set in such a way, that we can make new version active with one
+write into crash count table --- so that it is in sync with directory tree.
+
+Superblock
+----------
+
+The superblock is located at sector 0x4000 (assuming 512-byte sectors), the
+space below it is unused. Superblock contains general filesystem information and
+pointers to other structures.
+
+There is also txblock, allocated at variable position, usually after the
+superblock, it contains general filesystem information that changes during
+filesystem operation --- example disk_cc value, and (cc,txc) pair denoting which
+apage_index is valid. The reason for moving volatile information to another
+block is that if txblock would be damaged during write, filesystem could still
+be recovered using the superblock.
+
+All pointers to other blocks are in sectors (512-byte size) even if the
+filesystem has larger block size. If the block size is larger than 512, pointers
+on disk have to be divisible by (block_size/512).
+
+Allocation strategy
+===================
+
+Filesystem has three zones (metadata, small files and large files) and it
+tries to satisfy the allocation from the appropriate zone. If the zone is full,
+other zones are used. Each zone has set of groups. The groups and zones have no
+disk structures associated with them --- they are kept only in memory and their
+purpose is to prevent fragmentation.
+
+Each directory has pointer to its current small file and large file zone, its
+files are allocated from these zones. When it fills up (or when it can't satisfy
+a large request), an another zone with less-than-average free space is found and
+assigned to a directory. When extending already existing files, the filesystem
+tries to allocate space in a zone near the file end, when there is no free
+space, again, less-than-average zone is found (but directory zone is not
+updated, except in case it is files' first allocation in large file zone).
+
+In large file zone, allocations are padded up to cluster-size value (adjustable
+in mkspadfs) to evade free space fragmentation.
+
+vim: textwidth=80

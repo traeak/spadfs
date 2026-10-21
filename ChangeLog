@@ -1,0 +1,670 @@
+== RELEASE 1.0.22 ===
+
+Fri Jan 16 18:23:50 CET 2026
+
+	Support the kernels up to 6.19-rc
+
+== RELEASE 1.0.21 ===
+
+Sun Feb 16 10:45:04 CET 2025
+
+	Support the kernels up to 6.14-rc
+
+Sat Feb 15 20:42:04 CET 2025
+
+	Work around "memcpy: detected field-spanning write" warnings
+
+Sat Feb 15 20:31:51 CET 2025
+
+	Fix a bug that spadfs_new_inode didn't clear the extent cache
+
+=== RELEASE 1.0.20 ===
+
+Sun Aug  4 15:45:37 CEST 2024
+
+	Support the kernels up to 6.11-rc
+
+=== RELEASE 1.0.19 ===
+
+Sun Mar 31 18:06:33 CEST 2024
+
+	Support the kernels up to 6.9-rc
+
+=== RELEASE 1.0.18 ===
+
+Fri Sep 29 21:21:05 CEST 2023
+
+	Support the kernels up to 6.6-rc
+
+=== RELEASE 1.0.17 ===
+
+Fri Oct 21 19:16:48 CEST 2022
+
+	Support the kernels 6.0 and 6.1-rc
+
+=== RELEASE 1.0.16 ===
+
+Wed Jun  8 18:28:28 CEST 2022
+
+	Support the kernels 5.18 and 5.19-rc
+
+=== RELEASE 1.0.15 ===
+
+Sat Nov 27 15:20:58 CET 2021
+
+	Fix a crash on kernel 5.14 due to NULL set_page_dirty
+	Support kernels up to 5.16-rc2
+
+=== RELEASE 1.0.14 ===
+
+Fri Mar  5 18:55:52 CET 2021
+
+	Support the kernel 5.12-rc3
+
+=== RELEASE 1.0.13 ===
+
+Fri Mar  5 18:55:52 CET 2021
+
+	Support the kernel 5.12
+
+=== RELEASE 1.0.12 ===
+
+Thu Aug 20 21:24:26 CEST 2020
+
+	Support the kernel 5.8 and 5.9
+
+=== RELEASE 1.0.11 ===
+
+Thu Jan 23 20:14:06 CET 2020
+
+	Detect block devices with logical sector size greater than 4096
+	and set default block size accordingly
+
+=== RELEASE 1.0.10 ===
+
+Wed Feb 27 21:45:15 CET 2019
+
+	Fixed a crash in spadfs_discard_reservation
+
+Sat Jan 12 17:44:19 CET 2019
+
+	Update for the kernel 5.0-rc1
+
+=== RELEASE 1.0.9 ===
+
+Sat Jun  9 22:46:08 CEST 2018
+
+	Use the error code EUCLEAN instead of EPERM for filesystem corruption
+
+Mon Dec 25 13:11:24 CET 2017
+
+	Introduce a spadfsck option --zero-file-tails, it will check if the
+	space beyond file end is zero and eventually overwrite it with zeros.
+
+	The space beyond file end is inaccessible with the read syscall, but it
+	can be accessed with mmap.
+
+Sun Dec 24 17:47:29 CET 2017
+
+	Allow mounting filesystem with larger block size than kernel page size
+
+Sun Dec 24 16:46:52 CET 2017
+
+	Fill the space beyond file end with zeros when truncating
+
+Sat Dec 23 14:03:28 CET 2017
+
+	Fixed a problem that the filesystem would save a piece of uninitialized
+	memory to the disk when creating hardlinks. It doesn't cause filesystem
+	corruption, but it could cause unintended data leak.
+
+=== RELEASE 1.0.8 ===
+
+Mon Dec 11 15:54:17 CET 2017
+
+	Changeable uid and gid on symlinks
+
+Mon Dec 11 13:18:07 CET 2017
+
+	Fix a bug in spadfsck that it would un-share hardlinked files when
+	doing recovery
+
+Mon Dec 11 09:32:20 CET 2017
+
+	Fix a bug that spadfsck would change inode number of a symlink when
+	recovering it
+
+Sun Dec 10 09:24:50 CET 2017
+
+	Use i_ino that is immutable while the inode is in memory
+	This fixes problems with ssh ControlMaster option
+
+Sat Dec  9 05:41:16 CET 2017
+
+	When compiling spadfsck, make it possible to select the type of
+	asynchronous I/O using
+		make AIO=posix
+		make AIO=linux
+		make AIO=posix,linux
+		make AIO=linux,direct
+	Make it possible to disable aio at runtime using --noaio
+
+	Note - the current implementation of posix aio mostly degrades
+	performance, so it is not recommended.
+	AIO=linux,direct may or may not improve performance over buffered I/O,
+	it has to be tested.
+
+Fri Dec  8 06:39:11 CET 2017
+
+	Fix some overflows that could happen on volumes larger than 256TiB
+
+=== RELEASE 1.0.7 ===
+
+Thu Aug 24 00:21:44 CEST 2017
+
+	Fix compile failure with quotas and kernel 4.12
+
+=== RELEASE 1.0.6 ===
+
+Sun Aug  6 20:24:10 CEST 2017
+
+	The fix for unintended signed extension was incomplete. We can't shift
+	unsigned short value left by 16 bits, it is extended to int and the
+	shift could result in a integer overflow
+
+=== RELEASE 1.0.5 ===
+
+Thu Jul  6 05:38:42 CEST 2017
+
+	Fixed unintended signed extension that would cause errors when accessing
+	directory entries beyond 1TiB limit
+
+Wed Jun  7 20:25:18 CEST 2017
+
+	Fixed a bug that extended attributes could not be set on deleted files
+
+Tue Jun  6 02:06:31 CEST 2017
+
+	Implement the fallocate syscall
+
+Mon Jun  5 02:21:27 CEST 2017
+
+	Improve the preallocation system, so that it causes less fragmentation
+
+Sat Jun  3 22:45:00 CEST 2017
+
+	Fixed a bug that "du" reported a wrong number for blocks for a file if
+	the filesystem ran out of space when extending the file
+
+=== RELEASE 1.0.4 ===
+
+Wed Feb 22 19:31:22 CET 2017
+
+	Don't use preallocated data if the process group of the current process
+	is different from process group of the process that preallocated the
+	data.
+
+=== RELEASE 1.0.3 ===
+
+Fri Oct 28 12:59:04 CEST 2016
+
+	By default, mkspadfs won't pad files to a cluster size
+
+	The purpose is to mitigate the possibility of leaked file sizes when the
+	filesystem is used on encrypted device and the device was not
+	overwritten prior to creating the filesystem
+
+Mon Oct 17 20:19:26 CEST 2016
+
+	Fixed a bug that errors were displayed on multiple lines in syslog
+
+Sat Sep  3 15:43:59 CEST 2016
+
+	Support the FIEMAP ioctl
+
+Sun Aug 21 16:10:52 CEST 2016
+
+	Fixed a peformance problem - metadata readahead didn't work with block
+	size 512 or 1024
+
+Wed Aug  3 01:05:58 CEST 2016
+
+	Add module parameter minimize_inode_size. It reduces memory allocated
+	for an inode.
+
+	When the parameter is not set, an inode contains extent cache for each
+	CPU - so the inode size grows with the growing number of CPUs.
+
+	When the parameter is set, an inode contains just one cached extent and
+	a mutex is used when accessing it. It reduces the size of an inode. The
+	downside is that the locking reduces performance.
+
+Tue Aug  2 22:51:20 CEST 2016
+
+	Fix a warning in cpumask_check when the kernel is compiled with
+	CPUMASK_OFFSTACK.
+
+Sat Jul  9 17:31:16 CEST 2016
+
+	Synchronize the bmap ioctl (so that concurrent bmap and other activity
+	won't result in misbehavior) and test bmap argument for file size limit.
+	The FIBMAP ioctl is only accessible to root, so unprivileged user can't
+	trigger crashes with this.
+
+=== RELEASE 1.0.2 ===
+
+Sun Jun 19 18:37:05 CEST 2016
+
+	Increased default metadata prefetch to 512kiB
+	Fixed a bug that prefetch was reported incorrectly in /proc/mounts
+
+Sat Jun 18 23:50:33 CEST 2016
+
+	Fixed BUG_ON(spadfnode(i)->mmu_private > spadfnode(i)->disk_size) when
+	the filesystem runs out of space and when block size is different from
+	page size.
+
+=== RELEASE 1.0.1 ===
+
+Mon Apr  4 20:40:58 CEST 2016
+
+	Updated for kernels 4.5 and 4.6-rc
+	mkspadfs --no-trim and --trim options to disable or enable trim
+	Support the silent mount option, so that no log messages are reported
+	when the kernel attempts to detect filesystem type
+
+=== RELEASE 1.0.0 ===
+
+Tue Nov 17 20:52:59 CET 2015
+
+	Fixes for asynchronous I/O. spadfsck can be built with
+		make spadfsck CFLAGS="-DLINUX_AIO -laio"
+	or
+		make spadfsck CFLAGS="-DPOSIX_AIO -lrt"
+	to use Linux or Posix asynchronous I/O (Linux aio has better
+	performance). If none of these options is selected, spadfsck will use
+	the readahead syscall.
+
+Tue Nov 17 15:14:24 CET 2015
+
+	A new spadfsck flag --extend, it extends the filesystem after device
+	size was increased. If it is used on mounted filesystem, the filesystem
+	will be extended on next reboot.
+
+Tue Oct 27 21:58:15 CET 2015
+
+	Disable metadata prealloc, it caused metadata zone fragmentation
+
+Tue Oct 27 18:22:00 CET 2015
+
+	Drop the allocator lock while a trim command is in progress, it improves
+	latency while trimming
+
+Mon Oct 26 20:33:11 CET 2015
+
+	Use kmalloc instead of vmalloc if possible
+
+Sun Oct 25 23:44:54 CET 2015
+
+	Use hash table instead of walking the full list of inodes, it improves
+	performance when working with many files
+
+Sun Oct 25 17:21:22 CET 2015
+
+	Use the space before superblock for data or metadata
+
+Sat Oct 24 23:25:23 CEST 2015
+
+	Fixed occasional "no shadow when resurrecting blocks" error
+
+Mon Oct  5 23:22:11 CEST 2015
+
+	Fixed performance degradation on fragmented filesystem due to prealloc
+
+Mon Oct  5 22:21:41 CEST 2015
+
+	Fixed occasional error "can't find apage for block" that was caused by
+	preallocation code
+
+=== RELEASE 0.9.17 ===
+
+Sat Aug 22 16:39:09 CEST 2015
+
+	Make spadfsck not correct missing superblock, root directory or
+	corrupted apages in automatic mode during boot because under some
+	circumstances these corrections could cause more damage. The user should
+	run spadfsck manually to fix these problems.
+
+Mon Jul 27 18:52:00 CEST 2015
+
+	Fixed a crash with quotas on kernels 3.19 and newer
+
+Sun Jun 28 14:29:06 CEST 2015
+
+	Update directory times when modifying a directory
+
+Sat May  9 11:23:31 CEST 2015
+
+	Implement preallocation on metadata and small files
+	- it improves performance and reduces space fragmentation
+
+=== RELEASE 0.9.16 ===
+
+Sat Mar 21 21:30:42 CET 2015
+
+	Support fstrim
+
+=== RELEASE 0.9.15 ===
+
+Sat Jul 12 21:15:49 CEST 2014
+
+	Fixed performance degradation on big filesystems due to the apage cache
+	Clear apage cache when splitting an apage
+
+Thu Nov 21 01:17:50 CET 2013
+
+	Fixed performance degradation when the filesystem was running out of
+	space
+
+Wed Nov 20 01:48:42 CET 2013
+
+	Fixed misnamed arguments in /proc/mounts
+
+Sat Nov  9 23:24:12 CET 2013
+
+	Ignore sync() syscall if there is nothing to sync
+
+Sat Oct  5 17:46:19 CEST 2013
+
+	Fixed lockdep warning with more than 8 cores
+	Fixed uninitialized variable warning
+
+Wed May 22 21:42:23 CEST 2013
+
+	Returned number of used blocks was off-by-one for newly created
+	directories when compiled without quota
+
+Sat Apr 27 20:59:42 CEST 2013
+
+	Make it work without CONFIG_LBDAF with devices smaller than 2TiB
+		(previously the limit was 1TiB)
+	Fix BUG when compiled for IA-64 with gcc 3 or lower.
+	Fix structure alignment on ARM OABI
+	Make it work with kernels as far as 2.6.8
+
+=== RELEASE 0.9.14 ===
+
+Sun Nov 18 00:15:19 CET 2012
+
+	Fixed a bug if the user used multiple extended attributes in different
+	namespaces
+
+=== RELEASE 0.9.13 ===
+
+Thu Aug 18 21:27:22 CEST 2011
+
+	Fixed a possible checksum failure on anode
+	Anode locking was noticeably simplified
+	Don't increase crash count on background if the filesystem is idle
+
+Wed Jul 27 02:21:12 CEST 2011
+
+	Fixed a crash with too high NR_CPUs
+	Lowered per-inode memory consumption with too high NR_CPUs
+
+=== RELEASE 0.9.12 ===
+
+Sun May  8 16:31:52 CEST 2011
+
+	Extended attributes
+	Maintain directory sizes
+	Quota support
+	Spadfsck fixes
+
+=== RELEASE 0.9.11 ===
+
+Tue May  4 05:34:36 CEST 2010
+
+	Many other changes:
+	Root inode attributes can be changes
+	Stable inode numbers
+	Fixed a memory read beyond buffer end
+	Fixed a crash count non-working when using remount,ro or remount,rw
+	Spadfsck fixes
+	Fixed a bug when file is truncated to its actual size
+	Fixed an extent cache bug
+
+Sat Nov  1 20:35:12 CET 2008
+
+	Don't allocate from metadata zone if the file rolls over the end of disk
+
+Tue Sep  2 05:44:47 CEST 2008
+
+	Fixed for non-barrier devices on Linux 2.6.26. They broke it somehow.
+
+Sun Aug 24 01:58:40 CEST 2008
+
+	Fixed BUG on mount when the disk format is corrupted
+	Buffer readahead
+
+=== RELEASE 0.9.10 ===
+
+Thu Aug 21 05:31:57 CEST 2008
+
+	Support 2.6.27-rc3 kernel
+
+Tue Jul  8 05:26:59 CEST 2008
+
+	Use mutexes instead of semaphores because they are faster
+	Use mpages
+
+=== RELEASE 0.9.9 ===
+
+Sat Jun 21 19:17:18 CEST 2008
+
+	Updated for kernel 2.6.26-rc*
+
+Thu May 15 22:05:28 CEST 2008
+
+	Fixed some buffer reference leaks
+
+Wed May 14 21:38:02 CEST 2008
+
+	Support for kernel 2.6.24, 2.6.25
+	Fixed memory leak when mounting failed
+
+=== RELEASE 0.9.8 ===
+
+Sat Nov 10 19:29:09 CET 2007
+
+	Support for 2.6.23 kernel
+
+=== RELEASE 0.9.7 ===
+
+Tue Jul 31 03:33:27 CEST 2007
+
+	Allow extending files with truncate
+	(and fix a bug when truncating by a small amount could truncate few more
+	bytes)
+
+Tue Jul 10 04:01:34 MET DST 2007
+
+	Make it compile on 2.6.22
+
+Tue Jul 10 03:41:54 MET DST 2007
+
+	Fixed creating invalid extended attributes when runing git
+
+Mon Apr 30 01:32:28 MET DST 2007
+
+	Fixed bug in spadfsck causing in rare cases that it needed to be run
+	twice to correct all bugs
+
+Mon Apr 30 01:17:19 MET DST 2007
+
+	Use write barriers when available
+
+	The idea of barriers is cool (it allows to do sync without blocking
+	blocking activity), the implementation is terrible --- barrier write
+	fails on barrier-incapable device, so filesystems need to have two paths
+	for syncing (Ext3 and XFS have two commit code paths too).
+
+	It would be much better if WRITE_BARRIER requests always succeeded
+	(eventually degrading to WRITE requests on incapable devices) and
+	filesystem could ask the block layer via some function if barriers are
+	safe.
+
+	Note that when the device drops support for barriers while mounted, it
+	will break this filesystem (it won't damage data but it will prevent any
+	operations from being commited). I don't know if changing barrier
+	support while mounted is possible.
+
+	There is a bug in IDE and ATA drivers that they don't support cache on
+	standards earlier than ATA-6 (the author apparently read ATA-6/7/8 docs
+	and didn't realize that in ATA 4 and 5 test for presence of FLUSH_CACHE
+	command is different). IDE driver reports that it doesn't support
+	barriers (even if the cache is turned off) and this filesystem will be
+	marked for fsck in case of crash.
+
+Sun Apr 29 16:28:01 MET DST 2007
+
+	Hold buffers for few last used apage maps --- improves performance when
+	doing too many alloc/free operations on the same place
+
+Fri Apr 27 05:36:28 MET DST 2007
+
+	Optimized locking for SMP (avoid cacheline bouncing when more CPUs lock
+	for read intensively)
+
+=== RELEASE 0.9.5 ===
+
+Thu Mar 22 23:56:33 MET 2007
+
+	Fixed an error when freeing extent that was larger than 2TB and block
+	size was larger than 512. The error couldn't lead to data corruption,
+	only to the situation that part of the extent was not freed and error
+	message was written to log
+
+Tue Feb 20 16:27:38 MET 2007
+
+	NEW_WORKQUEUE should be defined from 2.6.20 kernels, not from 2.6.19
+	Fixed compilation problems with 2.6.19
+
+=== RELEASE 0.9.4 ===
+
+Sun Jan  7 22:16:05 CET 2007
+
+	Make it compile on kernel 2.6.19 and 2.6.20-rc
+
+Sun Jan  7 21:13:47 CET 2007
+
+	Changed an inode allocation from GFP_KERNEL to GFP_NOFS --- removes a
+	deadlock possibility and creates a failure possibility (that most other
+	filesystems also have)
+
+	It should be probably changed to allocate inode outside the lock with
+	GFP_KERNEL
+
+Sun Jan  7 20:30:41 MET 2007
+
+	Fixed abuse of i_blkbits --- it would cause error on 2.6.19 but it
+	didn't compile anyway
+
+=== RELEASE 0.9.3 ===
+
+Wed Jan  3 05:25:29 MET 2007
+
+	Directories were corrupted and/or kernel locked up if someone tried to
+	create filename longer than 255 characters, now it returns ENAMETOOLONG
+	(found with fsstress)
+
+Tue Jan  2 03:05:08 CET 2007
+
+	Fixed getting bad hints on allocator (the bug didn't damage data but
+	lead to fragmentation and bad performance)
+
+Tue Jan  2 02:07:49 MET 2007
+
+	Tree structure changed so that utilities are in separate subdirectories
+	(the conding style is still pending change, but I want to do some
+	testing after that)
+
+Tue Jan  2 01:26:06 MET 2007
+
+	Reverted 64-bit inode numbers until -EOVERFLOW is resolved
+
+Sat Dec 23 23:27:53 MET 2006
+
+	Fixed readdir looping when excessive hash collisions happened
+
+Sat Dec 23 22:39:45 MET 2006
+
+	spadfsck fixes:
+	Fixed crash when root directory was dnode (approx > 80 entries)
+	Fixed memory leak (only noticeable with --debug-malloc)
+	Fixed ininite loop during apage rebuild
+	When user declined to fix errors, it could errorneously report
+		unreliable device
+	When allocating chains (this could only happen because of hash
+		mismatch), it did not correctly set prev pointer
+	When recovering directories, it did set badly up-dnode pointer (and
+		set it again correctly on second run)
+
+Sat Dec 23 21:02:09 MET 2006
+
+	Return 64-bit inode numbers on 2.6.19
+	Reduced ino_t collision possibility (to devices > 256Gib) on previous
+	kernels or on old applications that use old 32-bit ino_t
+
+Sat Dec 23 20:18:01 MET 2006
+
+	Inode counts in statfs now report total and free blocks in metadata zone
+	(but the filesystem is able to operate even if it runs out of metadata
+	zone and there is free space in other zones)
+
+	I hope that 0 free inodes statistics won't confuse applications,
+	according to POSIX they shouldn't rely on statvfs results
+
+Sat Dec 23 20:15:56 MET 2006
+
+	Fixed possibility that readdir skips some entries if directory is split
+	between successive readdir calls
+
+Sat Dec 23 04:16:38 MET 2006
+
+	Fixed reading memory few bytes beyond buffer end
+
+Sun Dec 10 21:06:25 cet 2006
+
+	Added comments to code
+
+Sun Nov  5 01:10:09 MET 2006
+
+	Removed a forgotten debug print from spadfsck
+
+=== RELEASE 0.9.2 ===
+
+Fri Nov  3 19:37:43 MET 2006
+
+	Use largefile when available instead of _llseek (some broken newer
+	systems don't have _syscall macros)
+	Fix compile of utilities with libc5
+
+Fri Nov  3 19:36:54 MET 2006 Jan Engelhardt <jengelh@linux01.gwdg.de>
+
+	Build using tools from modules/kernel-version/build directory, not from
+	kernel source
+
+=== RELEASE 0.9.1 ===
+
+Fri Nov  3 02:12:31 CET 2006
+
+	Fixed compilation on 2.6.18 and 2.6.19rc kernels
+
+=== RELEASE 0.9.0 ===
+
+Fri Nov  2 22:44:17 MET 2006
+
+	First public release
+
+vim: textwidth=80

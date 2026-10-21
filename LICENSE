@@ -1,0 +1,70 @@
+LICENSE STATUS: UNRESOLVED
+=========================
+
+                    ***  THIS FILE IS NOT A LICENSE  ***
+
+No license has been granted for the contents of this repository. Nothing in this
+file should be read as permission to use, copy, modify, distribute, or rely upon
+this code. By default, all rights are reserved by the copyright holder.
+
+
+Who holds the rights
+-------------------
+
+SpadFS was designed and written by **Mikuláš Patočka** (Mikulas Patocka), as his
+PhD thesis. See [`CREDITS`](CREDITS).
+
+The maintainer of this GitHub repository is **not** the author and makes no claim
+of ownership over the SpadFS code. This repository is an unofficial mirror.
+
+
+Why this is unresolved
+---------------------
+
+The upstream v1.0.22 source snapshot this mirror was created from contains:
+
+  * **No `LICENSE` or `COPYING` file.**
+  * **No copyright notice in any source file.** Every apparent `(c)` match in the
+    tree is a C macro parameter, not a copyright statement.
+  * **No `MODULE_AUTHOR` tag. No upstream URL.**
+
+The only licensing signal present anywhere is:
+
+    MODULE_LICENSE("GPL");                    /* super.c:2058 */
+
+This is **not sufficient** to establish the licensing position, for two reasons:
+
+  1. `MODULE_LICENSE()` is a kernel-module declaration used by modpost for
+     tainting purposes. It is evidence of the author's intent, but it is not a
+     license grant and does not identify a specific license text.
+
+  2. It covers **only the kernel module**. The programs under `utils/mkspadfs/`
+     and `utils/spadfsck/` are standalone userspace executables that are not
+     linked into the kernel. They are not covered by that tag and currently carry
+     **no license statement of any kind**.
+
+
+What must happen before this code is used or redistributed
+--------------------------------------------------------
+
+The license must be confirmed **directly with the author**, resolving at minimum:
+
+  * Which license applies, and its exact variant — GPL-2.0-only vs
+    GPL-2.0-or-later is a material distinction and cannot be inferred.
+  * Whether the grant extends to the userspace tools under `utils/`, and on what
+    terms if it differs from the kernel module.
+  * Whether the author wishes to be the named copyright holder on a formal
+    `LICENSE` file, and under which contact/URL attribution.
+  * Whether the third-party documents added by this mirror — `DESIGN-ANALYSIS.md`,
+    `AGENTS.md`, and this file — should carry a separate license, since they are
+    not upstream content.
+
+Until every item above is settled with the author, this file stays as it is.
+
+
+For the maintainer of this mirror
+---------------------------------
+
+Do **not** replace this file with standard license text until the author has
+confirmed the terms. Doing so would assert a licensing position that nobody with
+standing has granted.

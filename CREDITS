@@ -1,0 +1,92 @@
+CREDITS
+=======
+
+This repository is **not** the upstream home of SpadFS, and its maintainer makes
+**no claim of authorship or ownership** of the SpadFS code contained here. The
+purpose of this file is to record who actually wrote it.
+
+
+Written by
+----------
+
+Name:      Mikuláš Patočka
+           (also transliterated without diacritics as "Mikulas Patocka")
+Role:      Designer and principal author of SpadFS
+Nationality: Czech
+Activity:  Long-time Linux kernel developer
+
+SpadFS was designed and developed as his PhD thesis. His stated goal was to
+obtain advanced features — crash recovery and fast directories — *without*
+making the code much more complex.
+
+Two design decisions follow directly from that goal, and they are what make this
+filesystem unusual:
+
+  * **Crash counts instead of journaling.** He considers journaling too complex
+    and bug-prone. SpadFS attaches an ambient `(cc, txc)` validity pair to each
+    structure and makes a whole batch of already-written metadata visible with a
+    single small write to a global counter table. See `INTERNALS` and
+    `spadfs.h:550` (`CC_VALID`).
+
+  * **Hashed directories instead of B-trees.** Large directories use a
+    Fagin-style extendible hash (`dnode`), not a balanced tree.
+
+Current version in this tree: **1.0.22**
+
+
+Contributors recorded in this tree
+---------------------------------
+
+Jan Engelhardt <jengelh@linux01.gwdg.de>
+
+  * Credited in `ChangeLog` (2006-11-03, release 0.9.2) for building using
+    tools from `modules/kernel-version/build` directory rather than from kernel
+    source.
+
+This is the only other individual named anywhere in the source tree. Absence of
+further names here should not be read as absence of outside help — it reflects
+only what this snapshot records.
+
+
+This mirror
+-----------
+
+Maintainer of this GitHub repository: *not the author.*
+
+This mirror exists to make the v1.0.22 source available and buildable on modern
+kernels. Changes made in this mirror, as distinct from upstream, are:
+
+  * `name.c`, `namei.c` — replaced `strncpy()` with `memcpy_and_pad()`.
+    `strncpy` has been removed from `include/linux/string.h` in recent kernels;
+    the old call also over-read the source by up to 7 bytes, since the length
+    argument was rounded up to a multiple of 8 past the end of the name.
+  * `name.c` — `#include <string.h>` changed to `#include <linux/string.h>`.
+  * `linux-compat.h` — added a `memcpy_and_pad()` shim for kernels < 5.9.
+  * `.gitignore` — root-anchored `/mkspadfs` and `/spadfsck` so the ignore
+    rules match the built binaries and not the source directories.
+  * `DESIGN-ANALYSIS.md` — third-party critical analysis, not upstream
+    documentation.
+  * `AGENTS.md` — contributor/agent guidelines for working in this mirror.
+  * `CREDITS` — this file.
+
+If you have questions about SpadFS itself, its design intent, or its licensing,
+please direct them to the author rather than to the maintainer of this mirror.
+
+
+Licensing
+---------
+
+**This file is an attribution notice. It is not a license.**
+
+The only licensing signal present in the source is:
+
+    MODULE_LICENSE("GPL");                    /* super.c:2058 */
+
+That declaration covers the kernel module. It does **not** by itself license the
+standalone userspace programs under `utils/` (`mkspadfs`, `spadfsck`), which are
+separate programs not linked into the kernel.
+
+A `LICENSE` file exists in this repository, but it is a **status notice, not a
+license grant** — it records that licensing is unresolved and must be settled with
+the author before this code is used or redistributed. See [`LICENSE`](LICENSE)
+and the banner at the top of [`README`](README).
