@@ -29,6 +29,7 @@ the unmodified v1.0.22 on identical workloads.
 | Upstream or fork? | **This repo is the upstream.** No fork. | No governance blocker. Changes land here directly. |
 | Must v1.0.22 volumes keep mounting? | **No.** | Compat-flag gating abandoned. Real fixes unlocked, including widening `cc`. |
 | What *is* required? | **Comparability to a reference implementation.** | The reference rig becomes a first-class Phase 0 deliverable and the acceptance test for every later phase. |
+| How is the new stack identified? | **As `spadfs2`** — a separate filesystem type, with `mkspadfs2` / `spadfsck2`. | The type name *replaces* the `flags_compat_*` machinery as the compatibility boundary. `main` stays pristine as the reference. |
 
 **What "no backwards compat" does *not* mean:** it does not mean the old and new
 stacks can read each other's images. They cannot. Comparability is therefore at
@@ -37,10 +38,19 @@ new stack, compare correctness and timing — not at the image level.
 
 ---
 
-## The reference rig: already supported by the build
+## The `spadfs2` identity
 
-`Kbuild` takes a `SPADFS_NAME` parameter that flows into the registered
-filesystem type and every slab cache name:
+The modernized stack is a **separate filesystem type**, not a version of
+`spadfs`. `main` keeps building `spadfs` / `mkspadfs` / `spadfsck` untouched as
+the reference; `modernization` builds `spadfs2` / `mkspadfs2` / `spadfsck2`.
+
+This replaces the `flags_compat_*` machinery with a stronger boundary: an old
+`spadfs.ko` cannot mount a `spadfs2` volume at all — wrong filesystem type — so
+no compat bits, no dual-algorithm migration windows, and no code whose only
+purpose is "don't misread the old format."
+
+**Verified this session.** `Kbuild`'s `SPADFS_NAME` flows into the registered
+type and every slab cache name:
 
 ```c
 .name = __stringify(SPADFS_NAME);                                  /* super.c:1931 */
@@ -49,17 +59,28 @@ kmem_cache_create(__stringify(SPADFS_NAME) "_ea_cache", ...);      /* super.c:20
 kmem_cache_create(__stringify(SPADFS_NAME) "_extent_cache", ...);  /* super.c:2026 */
 ```
 
-Verified this session — `make SPADFS_NAME=spadfsref` produces a module with
-`alias: fs-spadfsref` and caches `spadfsref_*`, disjoint from the main build's
-`spadfs_*`. **Both modules load simultaneously on one host**, and volumes mount
-as `-t spadfs` vs `-t spadfsref`.
+`make SPADFS_NAME=spadfs2` yields `alias: fs-spadfs2`, `name: spadfs2`, and
+`spadfs2_{inode,ea,extent}_cache` — disjoint from `spadfs_*`. There are **zero
+`EXPORT_SYMBOL`s in the tree**, so the thousands of internal `spadfs_*` function
+names cannot collide either. **No C symbol renaming is required.** Both modules
+load simultaneously on one host, and because the userspace tools are renamed too,
+**both full stacks install side-by-side permanently** — no worktree juggling and
+no output-directory isolation.
 
-**Caveat that must be designed around:** the userspace tools are **not**
-name-parameterized. There is one `mkspadfs` and one `spadfsck`, each bound to
-whatever format its source tree produces. A paired reference toolchain must be
-built from the pinned reference tree into a separate output directory, or the
-comparison is meaningless (modern `mkspadfs` output cannot be mounted by
-`spadfsref.ko`).
+### The format discriminator
+
+Of the eight magic constants, only `SUPERBLOCK_SIGNATURE "FS SPAD\000"`
+(`struct.h:68`; written `mkspadfs.c:459`, checked `super.c:1197` and
+`scksuper.c:121`) is a stable identifier. The rest — `TXBLOCK_MAGIC`,`FNODE_BLOCK_MAGIC`, `DNODE_PAGE_MAGIC`, `ANODE_MAGIC` — pass through
+`magic(block, m) = m ^ (dynamic_magic ? block : 0)` (`mkspadfs.c:148`), and
+`dynamic_magic` **defaults to 1** (`mkspadfs.c:89`), so they are already
+per-volume randomized and are not identifiers. Changing `SUPERBLOCK_SIGNATURE` to
+`"FS SPAD2\0"` is therefore the single decisive break.
+
+**Sequencing:** do *not* change the signature during Phase 0. Phase 0 must
+compare two format-identical stacks to establish behavioral equivalence first.
+The signature change is the deliberate fork point and belongs at the head of
+Phase 1.
 
 ---
 
@@ -86,12 +107,13 @@ Two items move sharply. The rest hold.
 
 | Phase | Scope | Format impact | Depends on |
 |---|---|---|---|
-| **0** | Test harness + reference rig | None | — |
-| **1** | crc32c metadata checksums | Full replace | 0.3 baseline |
-| **2** | cct backup table | Additive | 0.1, 1 |
-| **3** | Widen `cc` 16→32 | Every structure | 0, 2 |
-| **4** | Hash function + clustering measurement | Layout-derived | 0.4 rig |
-| **5** | Symlink cap, sparse files | New structures | 1–3 |
+| **0** | Test harness + side-by-side reference rig | None | — |
+| **1** | **Identity switch** — `spadfs2` name, signature, version reset, Makefile | The fork point | 0 |
+| **2** | crc32c metadata checksums | Full replace | 1, 0.3 baseline |
+| **3** | cct backup table | Additive | 2 |
+| **4** | Widen `cc` 16→32 | Every structure | 3 |
+| **5** | Hash function + clustering measurement | Layout-derived | 0.4 rig |
+| **6** | Symlink cap, sparse files | New structures | 2–4 |
 
 Each phase is its own plan. **Only Phase 0 is written in full here** — it is the
 prerequisite for all others and carries no format risk.
@@ -186,27 +208,32 @@ false all-clear.
   Classes caught only structurally are unprotected under `--no-checksums`.
 - [ ] **Step 4:** Commit `test: add structured corruption harness and checksum baseline`
 
-### Task 0.4: Reference rig ← *the answer to the comparability requirement*
+### Task 0.4: Side-by-side reference rig ← *the answer to the comparability requirement*
 
 **Files:** `tests/reference.sh`, `Makefile` (modified)
 
-- [ ] **Step 1:** Pin the reference. Tag the pristine v1.0.22 import:
-  `git tag -a reference-v1.0.22 59e33f2 -m "..."`. This is the comparison
-  baseline; it must never move. (Note: `59e33f2` already carries the minimal
-  `strncpy`/include build fixes — a truly pristine tree does not compile on
-  modern kernels, so this *is* the usable reference.)
-- [ ] **Step 2:** Build the reference into an isolated dir:
-  `git worktree add /tmp/spadfs-ref reference-v1.0.22`, then
-  `make -C /tmp/spadfs-ref SPADFS_NAME=spadfsref` and build its own
-  `mkspadfs`/`spadfsck` there. Verified: produces `spadfsref.ko` with
-  `alias: fs-spadfsref` and disjoint slab caches.
-- [ ] **Step 3:** `tests/reference.sh` — a workload driver that runs the **same
-  scripted operation sequence** against both stacks (privileged: `insmod`,
-  `mkspadfs`, `mount -t spadfs` / `-t spadfsref`), then compares:
-  operation exit codes, `spadfsck` cleanliness, and wall-clock timing.
-  Skip cleanly with a notice if not root.
-- [ ] **Step 4:** Add `make test-ref` target wrapping Step 3.
-- [ ] **Step 5:** Commit `test: add side-by-side reference rig using SPADFS_NAME`
+With the `spadfs2` rename, the rig no longer needs worktrees or isolated output
+directories — the two stacks have disjoint module names, fs types, slab caches,
+and tool names, so **both install permanently on one host**.
+
+- [ ] **Step 1:** Pin the reference. `git tag -a reference-v1.0.22 59e33f2 -m "..."`.
+  This is the comparison baseline and must never move. (Note: `59e33f2` already
+  carries the minimal `strncpy`/include build fixes — a truly pristine tree does
+  not compile on modern kernels, so this *is* the usable reference.)
+- [ ] **Step 2:** Parameterize this tree's build on the identity so
+  `make SPADFS_NAME=spadfs2` also produces `mkspadfs2` / `spadfsck2` (see
+  Phase 1 preview). For Phase 0 the *format* stays identical — only names differ.
+- [ ] **Step 3:** Install both stacks: reference `spadfs.ko` + `mkspadfs` +
+  `spadfsck` from the tag, and `spadfs2.ko` + `mkspadfs2` + `spadfsck2` from
+  this tree. Assert `lsmod` shows both and `cat /proc/filesystems` lists both
+  types.
+- [ ] **Step 4:** `tests/reference.sh` — run the **same scripted operation
+  sequence** against each stack (`mkfs` → `mount -t <type>` → create/stat/
+  rename/unlink workload → `umount` → `fsck`), comparing operation exit codes,
+  fsck cleanliness, and wall-clock timing. Privileged; skip cleanly with a notice
+  when not root.
+- [ ] **Step 5:** Add `make test-ref` wrapping Step 4.
+- [ ] **Step 6:** Commit `test: add side-by-side spadfs/spadfs2 reference rig`
 
 ### Task 0.5: Make target and CI
 
@@ -245,6 +272,50 @@ false all-clear.
    `FNODE_*_POS`-style derived constant silently corrupts layout.
    *Re-run 0.2's full matrix after Phase 3, and diff `sizeof()` assertions —
    `spadfs_struct_check_correctness()` in mkspadfs already does some of this.*
+
+---
+
+## Phase 1 preview — the identity switch
+
+The fork point. Mechanical, fully researched, and deliberately kept separate from
+the substantive Phase 2+ changes so the diff is reviewable as "this is where we
+broke away".
+
+Exact changes:
+
+| What | Where | Change |
+|---|---|---|
+| Module / fs type | `Kbuild` | `SPADFS_NAME = spadfs2` as the branch default |
+| Format discriminator | `struct.h:68` | `SUPERBLOCK_SIGNATURE` → `"FS SPAD2\0"` |
+| Version semantics | `struct.h:71-73` | Reset to spadfs2's own `1.0.0`; do not inherit 1.0.22 numbering |
+| Tool names | `Makefile` `all`, `install-userspace` | `mkspadfs2`, `spadfsck2` |
+| Filesystem symlinks | `Makefile:82-83` | `mkfs.spadfs2`, `fsck.spadfs2` |
+| Usage strings | `utils/spadfsck/sck.c:164` | `"spadfsck:"` → `"spadfsck2:"` (audit all tool banners) |
+| Module identity | `super.c:2058-2061` | Keep `MODULE_LICENSE("GPL")`; add `MODULE_DESCRIPTION` (clears the standing modpost warning) once authorship terms are confirmed |
+
+**Not changed:** the internal `spadfs_*` C symbol names. No `EXPORT_SYMBOL` exists,
+so they cannot collide, and renaming 15,600 lines for nothing is exactly the kind
+of churn this branch is trying to avoid.
+
+**Acceptance:** Phase 0's rig runs against the reference and shows behavioral
+parity on the operation sequence, *before* any Phase 2 format change is applied.
+
+---
+
+## Open decisions
+
+1. **Kernel floor for spadfs2.** `linux-compat.h` is ~350 lines of
+   `LINUX_VERSION_CODE` conditionals spanning 2.6.9 → 7.2 — five
+   `blkdev_issue_flush` signatures, `PASS_INODE`, `TEST_RHEL_VERSION`. This is
+   kernel-API drift, **not** format compatibility, so the `spadfs2` rename does
+   *not* remove it. But it is the single largest cruft source in the tree, and
+   the modernization branch is the natural place to drop it. Picking a floor
+   (e.g. ≥ 6.1 LTS) deletes most of `linux-compat.h` outright. **Needs a
+   decision before Phase 2**, since it changes which files every later phase
+   touches.
+2. **Licensing.** Still unresolved. `LICENSE` is a status notice, not a grant.
+   A `spadfs2` fork with a new signature does not change that — confirm terms
+   with the author before publishing the fork as usable.
 
 ---
 
