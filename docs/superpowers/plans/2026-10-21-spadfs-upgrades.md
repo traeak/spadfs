@@ -1,345 +1,260 @@
-# SpadFS Upgrades — Roadmap and Phase 0 Plan
+# SpadFS Modernization — Roadmap and Phase 0 Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development
 > (recommended) or superpowers:executing-plans to implement this plan task-by-task.
 > Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn the nine ranked weaknesses in `DESIGN-ANALYSIS.md` into a sequenced,
-format-safe upgrade program, starting with the verification harness that every
-later phase depends on.
+**Goal:** Modernize SpadFS's weakest subsystems in this repository, validated
+against a pinned reference implementation of the original v1.0.22 running
+side-by-side on the same host.
 
-**Architecture:** Classify each weakness by **on-disk format impact**, not by
-severity. Format-neutral work proceeds immediately; format-affecting work is gated
-behind the existing `flags_compat_*` negotiation machinery and a decision about
-upstream vs fork. Nothing that silently changes what bytes land on disk may be
-merged before a corruption-detection baseline exists.
+**Architecture:** Classify each weakness by **what a change costs**, not by
+severity. Because backwards compatibility is explicitly not required, the
+`flags_compat_*` negotiation that would otherwise dominate every change is
+**out of scope** — format changes are free. What replaces it as the controlling
+concern is the **reference rig**: every modernization must be measurable against
+the unmodified v1.0.22 on identical workloads.
 
-**Tech stack:** C (Linux kernel module + userspace tools), POSIX shell for the
-harness, `mkspadfs`/`spadfsck` as the test oracle, GitHub Actions for CI.
+**Tech stack:** C (Linux kernel module + userspace tools), shell harness,
+`SPADFS_NAME=` build parameterization for parallel module instances, GitHub Actions.
 
 **Spec:** [`DESIGN-ANALYSIS.md`](../../DESIGN-ANALYSIS.md) — *Ranked weaknesses*.
 
 ---
 
-## ⚠️ Read this before touching anything
+## Decisions taken (these shape everything below)
 
-Three facts established by direct verification in this session, each of which
-overrides what a reasonable reader would assume:
+| Question | Answer | Consequence |
+|---|---|---|
+| Upstream or fork? | **This repo is the upstream.** No fork. | No governance blocker. Changes land here directly. |
+| Must v1.0.22 volumes keep mounting? | **No.** | Compat-flag gating abandoned. Real fixes unlocked, including widening `cc`. |
+| What *is* required? | **Comparability to a reference implementation.** | The reference rig becomes a first-class Phase 0 deliverable and the acceptance test for every later phase. |
 
-1. **`version_major` is an exact-match gate.** `super.c:1210` rejects any volume
-   whose major differs. There is no minor-version tolerance for layout. Any change
-   to what bytes go where is a hard fork from every existing volume.
-
-2. **The compat-flag machinery is the only safe vehicle.** `super.c:1222-1227`:
-
-   ```c
-   flags_compat_rw  & ~(0)                              /* ANY bit → reject */
-   flags_compat_ro  & ~(FLAG_COMPAT_RO_DIRECTORY_SIZES)
-   flags_compat_none & ~(UNIX_NAMES|DYNAMIC_MAGIC|EXTRA_SPACE)
-   ```
-
-   Setting a bit in `flags_compat_rw` makes **old drivers refuse to mount** —
-   which is exactly the safety property we want for format-affecting changes.
-   The superblock also has a spare `__u64 pad2` (`struct.h:105`), so an additive
-   pointer fits without growing the structure.
-
-3. **The LSP in this repo lies.** No clangd is installed; kernel headers never
-   resolve, so it reports `unlikely`, `EINVAL` and `struct qstr` as undeclared.
-   GCC via kbuild is the only arbiter. See `AGENTS.md` Rule 1.
+**What "no backwards compat" does *not* mean:** it does not mean the old and new
+stacks can read each other's images. They cannot. Comparability is therefore at
+the **operation and workload level** — same sequence of operations, old stack vs
+new stack, compare correctness and timing — not at the image level.
 
 ---
 
-## Scope check — this is not one plan
+## The reference rig: already supported by the build
 
-The nine weaknesses split into four groups with incompatible risk profiles. Each
-group is its own plan; **only Phase 0 is written in full here**, because its
-output is a prerequisite for the other three and it carries no format risk.
+`Kbuild` takes a `SPADFS_NAME` parameter that flows into the registered
+filesystem type and every slab cache name:
 
-| Phase | Weakness | Format impact | Status |
+```c
+.name = __stringify(SPADFS_NAME);                                  /* super.c:1931 */
+kmem_cache_create(__stringify(SPADFS_NAME) "_inode_cache", ...);   /* super.c:2000 */
+kmem_cache_create(__stringify(SPADFS_NAME) "_ea_cache", ...);      /* super.c:2013 */
+kmem_cache_create(__stringify(SPADFS_NAME) "_extent_cache", ...);  /* super.c:2026 */
+```
+
+Verified this session — `make SPADFS_NAME=spadfsref` produces a module with
+`alias: fs-spadfsref` and caches `spadfsref_*`, disjoint from the main build's
+`spadfs_*`. **Both modules load simultaneously on one host**, and volumes mount
+as `-t spadfs` vs `-t spadfsref`.
+
+**Caveat that must be designed around:** the userspace tools are **not**
+name-parameterized. There is one `mkspadfs` and one `spadfsck`, each bound to
+whatever format its source tree produces. A paired reference toolchain must be
+built from the pinned reference tree into a separate output directory, or the
+comparison is meaningless (modern `mkspadfs` output cannot be mounted by
+`spadfsref.ko`).
+
+---
+
+## Revised ranking under "no backwards compat"
+
+Two items move sharply. The rest hold.
+
+- **#6 (crash-count ceiling) is now a real fix, not a workaround.** Previously
+  constrained to fsck recycling because widening `cc` breaks every structure.
+  With format freedom, `cc` can go 16 → 32 bits. Cost: `struct fnode`,
+  `apage_head`, `dnode_page`, `fnode_block`, `txblock` all carry `cc`, so it
+  touches every on-disk structure — but it is a *mechanical* change, and it
+  removes the ceiling permanently (2^32 mounts).
+- **#1 (checksum) is a straight replacement, not a negotiated migration.** No
+  dual-algorithm period, no compat bit. Replace `__byte_sum` with crc32c
+  everywhere and measure the detection-rate gain against the Phase 0 baseline.
+- **#4 (hash quality) becomes cheap to evaluate.** The reference rig answers the
+  "is it actually clustering?" question directly: same directory workload, old
+  hash vs new hash, compare lookup counts and timing. No more speculation.
+
+---
+
+## Roadmap
+
+| Phase | Scope | Format impact | Depends on |
 |---|---|---|---|
-| **0** | *(none — enabler)* | **None** | **Plan below, actionable now** |
-| **1** | #1 checksum, #2 cct mirror | Additive, flag-gated | Blocked on Q1–Q3 |
-| **2** | #4 hash quality | Layout-derived; needs full dir rebuild | Blocked on Q1, Q4 |
-| **3** | #7 symlink cap, #8 sparse files | New on-disk structures | Blocked on Q1–Q3 |
-| **—** | #3, #5, #9 | Architectural | **Not planned — see below** |
+| **0** | Test harness + reference rig | None | — |
+| **1** | crc32c metadata checksums | Full replace | 0.3 baseline |
+| **2** | cct backup table | Additive | 0.1, 1 |
+| **3** | Widen `cc` 16→32 | Every structure | 0, 2 |
+| **4** | Hash function + clustering measurement | Layout-derived | 0.4 rig |
+| **5** | Symlink cap, sparse files | New structures | 1–3 |
 
-### Two corrections to `DESIGN-ANALYSIS.md` found during verification
+Each phase is its own plan. **Only Phase 0 is written in full here** — it is the
+prerequisite for all others and carries no format risk.
 
-These change the ranking and should be folded back into the spec:
-
-- **#6 (2^16 crash-count ceiling) is already mitigated.** `fix_cct()`
-  (`sckcct.c:99-133`) handles an invalid table, can allocate a **new** cct at a
-  different location, and `--reset-crash-counts` zeroes the table and resets
-  `tx.cc` to 0. The residual risk is *operational* (hitting the ceiling without
-  noticing), not structural. **Downgrade from #6 to a monitoring task.**
-
-- **#2 (cct single point of failure) is narrower and easier than stated.** The
-  superblock **already has a backup copy** near the end of the device
-  (`mkspadfs.c:77`), located and validated by `test_backup_superblock()`
-  (`scksuper.c:166`), and fsck offers `CREATE BACKUP SUPERBLOCK?` when absent.
-  The crash-count table is written exactly once (`mkspadfs.c:516`) and has no
-  such copy. So mirroring `cct` is **not new machinery — it is applying a
-  precedent the format already uses.** This makes #2 cheap and idiomatic.
-
-### Not planned
+### Still not planned
 
 **#3** (size in directory block), **#5** (no ordered iteration), **#9** (no
-`open_by_handle_at`) are consequences of the two founding bets. Fixing any of
-them means un-embedding the inode or adding a second index — a different
-filesystem. They are documented as accepted trade-offs, not backlog items.
+`open_by_handle_at`) remain consequences of the two founding bets. "No backwards
+compat" does not make these cheap — they are redesigns of the inode-embedding and
+indexing model, not format tweaks. Revisit only if a concrete workload demands it.
 
 ---
 
-## Global constraints
+# Phase 0: Harness and Reference Rig
 
-- **Never change `version_major`.** (`SPADFS_VERSION_MAJOR`, `struct.h:71`.)
-- **Never change `CCT_SIZE` or `SSIZE_BITS`** — both marked `do not change it`.
-- Every format-affecting change **must** set a compat bit that old drivers reject,
-  and must be **detectable** by `spadfsck` on a volume written by an older driver.
-- All on-disk fields go through `CPU2SPAD*` / `SPAD2CPU*_LV`.
-- **Kernel and fsck must agree.** Every metadata structure is parsed in both
-  `super.c`/`dir.c`/`file.c` **and** `utils/spadfsck/`. A change to one without
-  the other is a silent divergence that only a crash reveals.
-- Clean build baseline: exactly one warning, `missing MODULE_DESCRIPTION()`.
-- **Licensing is unresolved.** `LICENSE` is a status notice, not a grant. See
-  `AGENTS.md` Rule 7. Do not add `SPDX-License-Identifier` anywhere.
+**Goal:** an unprivileged, scripted round-trip suite that (a) creates and checks
+volumes, (b) measures structured-corruption detection, and (c) runs the pristine
+v1.0.22 side-by-side with the working tree as a comparison oracle.
 
----
+**Why first:** the repo has **zero** test infrastructure today (verified: no
+`test/`, no kunit, only `#ifdef TESTCODE` hooks in spadfsck). Every later phase
+is unverifiable without it, and the reference-comparison requirement cannot be
+met at all without 0.4.
 
-## The governance question that gates Phases 1–3
-
-This is a **mirror of a live upstream project by a named author**, currently
-**without a confirmed license**. Every format-affecting change forks the format:
-images written by our `mkspadfs` become unreadable by upstream, and vice versa.
-
-That is not a technical objection — it is the reason Phases 1–3 are not written
-in detail here. The right answer differs completely depending on whether this is
-a contribution, a fork, or a research sandbox. See the questions at the end.
-
-**Phase 0 is safe under all three answers**, which is why it is the one to do now.
-
----
-
-# Phase 0: Verification Harness
-
-**Goal:** an unprivileged, repeatable, scripted round-trip test that can create
-volumes, corrupt them in *structured* ways, and measure what fraction of damage
-each checksum detects — producing the baseline number that Phase 1 argues from.
-
-**Why this is first:** there is currently **zero test infrastructure** in this
-repository (verified: no `test/`, no kunit, only `#ifdef TESTCODE` hooks in
-spadfsck). Proposing a checksum upgrade without a way to measure detection rates
-is proposing a change that cannot be validated.
-
-**Key capability discovered:** the whole cycle runs **without root, without loop
-devices, and without loading the module**:
+**Key capability verified:** the full create/check cycle runs **without root,
+without loop devices, and without loading the module**:
 
 ```bash
 dd if=/dev/zero of=/tmp/t.img bs=1M count=64
-./mkspadfs --block-size 4096 --no-trim /tmp/t.img     # exit 0
-./spadfsck -f /tmp/t.img                              # exit 0, "clean"
+./mkspadfs --block-size 4096 --no-trim /tmp/t.img   # exit 0
+./spadfsck -f /tmp/t.img                            # exit 0, clean
 ```
 
-Verified this session. Note `mkspadfs` opens with `O_RDWR|O_EXCL` and **no
-`O_CREAT`** — the image file must be pre-created.
+Note `mkspadfs` opens with `O_RDWR|O_EXCL` and **no `O_CREAT`** — the image
+must be pre-created.
 
-**Out of scope for Phase 0:** anything requiring the module loaded (mount, fsx,
-crash-injection, fio). Those need a privileged runner and are a separate tier.
+**Privileged tier (out of scope here):** mount, fsx, fio, crash-injection.
+Those need root and a second tier of CI runner. 0.4's module comparison needs
+`insmod`, so it is marked privileged and skipped when unavailable.
 
 ---
 
 ### Task 0.1: Fixture generator
 
-**Files:**
-- Create: `tests/lib.sh`
-- Create: `tests/fixtures.sh`
+**Files:** `tests/lib.sh`, `tests/fixtures.sh`
 
 **Interfaces:**
-- Produces: `make_image <path> <size> [mkspadfs-opts...]` → 0 on success;
-  `REPO_ROOT` variable; `require_tools` asserting `./mkspadfs` and `./spadfsck` exist.
+- Produces: `make_image <path> <size> [opts...]` → 0; `REPO_ROOT`; `require_tools`.
 
-- [ ] **Step 1: Write `tests/lib.sh`** with `REPO_ROOT` resolution, a
-  `die()`/`log()` pair, and `require_tools` that fails loudly if `./mkspadfs` or
-  `./spadfsck` is missing (they are build products — the script must build them
-  or instruct the user to run `make`).
-
-- [ ] **Step 2: Write `make_image` in `tests/fixtures.sh`** — `dd` a sparse file,
-  invoke `mkspadfs --no-trim "$@"`, assert exit 0.
-
-- [ ] **Step 3: Smoke it**
-
-  Run: `bash -c '. tests/lib.sh; . tests/fixtures.sh; make_image /tmp/x.img 64M'`
-  Expected: exit 0, file exists, `./spadfsck -n /tmp/x.img` reports clean.
-
-- [ ] **Step 4: Commit** `test: add fixture generator for unprivileged volume creation`
-
----
+- [ ] **Step 1:** `tests/lib.sh` — `REPO_ROOT` resolution, `log()`/`die()`,
+  `require_tools` asserting `./mkspadfs` and `./spadfsck` exist (build products;
+  fail with "run make" if absent).
+- [ ] **Step 2:** `make_image` in `tests/fixtures.sh` — `dd` a file filled with a
+  **non-zero pattern** (not sparse zeros — see Review Focus #4), then `mkspadfs
+  --no-trim "$@"`, assert exit 0.
+- [ ] **Step 3:** Smoke: `make_image /tmp/x.img 64M` → exit 0 and
+  `spadfsck -n /tmp/x.img` clean.
+- [ ] **Step 4:** Commit `test: add fixture generator for unprivileged volume creation`
 
 ### Task 0.2: Round-trip matrix
 
-**Files:**
-- Create: `tests/roundtrip.sh`
+**Files:** `tests/roundtrip.sh`
 
-**Interfaces:**
-- Consumes: `make_image` from 0.1.
-- Produces: pass/fail over a matrix of mkspadfs options.
+- [ ] **Step 1:** Matrix over the options that change on-disk layout:
+  `--block-size {512,4096}`, `--unix-names`/`--spad-names`,
+  `--big-endian`/`--little-endian`, `--dynamic-magic`, `--directory-sizes`,
+  `--checksums`/`--no-checksums`, `--cluster-size`/`--cluster-threshold`.
+- [ ] **Step 2:** Assert `spadfsck -f` exits 0 on every freshly created volume.
+  Non-zero on a virgin image is a bug worth surfacing now.
+- [ ] **Step 3:** Run; all combinations PASS.
+- [ ] **Step 4:** Commit `test: add mkspadfs/spadfsck round-trip matrix`
 
-- [ ] **Step 1: Write the matrix** — exercise the option combinations that change
-  on-disk layout, since those are where format assumptions hide:
-  `--block-size {512,4096}`, `--unix-names` vs `--spad-names`,
-  `--big-endian` vs `--little-endian`, `--dynamic-magic`,
-  `--directory-sizes`, `--checksums` vs `--no-checksums`,
-  and `--cluster-size`/`--cluster-threshold` variants.
+### Task 0.3: Structured corruption + detection baseline
 
-- [ ] **Step 2: For each, assert `spadfsck -f` exits 0** on a freshly created
-  volume. Any non-zero exit on a virgin image is a bug worth finding now.
+**Files:** `tests/corrupt.py`, `tests/detect.sh`, `tests/BASELINE-checksum-detection.md`
 
-- [ ] **Step 3: Run and record**
+The current checksum is an 8-bit XOR fold (`__byte_sum`, `struct.h:947`).
+XOR is commutative and associative, so it is **provably blind** to word swaps,
+word duplication, and block copies — the classes real hardware produces. It
+detects single-bit flips 100%. Random-bit testing would show ~100% and give a
+false all-clear.
 
-  Run: `bash tests/roundtrip.sh`
-  Expected: all combinations PASS.
+- [ ] **Step 1:** `tests/corrupt.py` classes: `bitflip`, `word_swap`, `word_dup`,
+  `block_copy`, `byte_transpose`, `xor_cancel`, `zero_out`.
+- [ ] **Step 2:** `tests/detect.sh` — for each class × each metadata target
+  (superblock, txblock, cct, fnode block, dnode, apage), corrupt a copy and
+  record whether `spadfsck -n` exits non-zero. Run every class **twice**: once
+  with checksums on, once `--no-checksums`.
+- [ ] **Step 3:** Write the matrix to `tests/BASELINE-checksum-detection.md`.
+  For any class showing high detection, record **which layer** caught it —
+  checksum vs structural validation (magic, range, `cc`/`txc` ordering).
+  Classes caught only structurally are unprotected under `--no-checksums`.
+- [ ] **Step 4:** Commit `test: add structured corruption harness and checksum baseline`
 
-- [ ] **Step 4: Commit** `test: add mkspadfs/spadfsck round-trip matrix`
+### Task 0.4: Reference rig ← *the answer to the comparability requirement*
 
----
+**Files:** `tests/reference.sh`, `Makefile` (modified)
 
-### Task 0.3: Structured corruption injection — the important one
+- [ ] **Step 1:** Pin the reference. Tag the pristine v1.0.22 import:
+  `git tag -a reference-v1.0.22 59e33f2 -m "..."`. This is the comparison
+  baseline; it must never move. (Note: `59e33f2` already carries the minimal
+  `strncpy`/include build fixes — a truly pristine tree does not compile on
+  modern kernels, so this *is* the usable reference.)
+- [ ] **Step 2:** Build the reference into an isolated dir:
+  `git worktree add /tmp/spadfs-ref reference-v1.0.22`, then
+  `make -C /tmp/spadfs-ref SPADFS_NAME=spadfsref` and build its own
+  `mkspadfs`/`spadfsck` there. Verified: produces `spadfsref.ko` with
+  `alias: fs-spadfsref` and disjoint slab caches.
+- [ ] **Step 3:** `tests/reference.sh` — a workload driver that runs the **same
+  scripted operation sequence** against both stacks (privileged: `insmod`,
+  `mkspadfs`, `mount -t spadfs` / `-t spadfsref`), then compares:
+  operation exit codes, `spadfsck` cleanliness, and wall-clock timing.
+  Skip cleanly with a notice if not root.
+- [ ] **Step 4:** Add `make test-ref` target wrapping Step 3.
+- [ ] **Step 5:** Commit `test: add side-by-side reference rig using SPADFS_NAME`
 
-**Files:**
-- Create: `tests/corrupt.py`
-- Create: `tests/detect.sh`
+### Task 0.5: Make target and CI
 
-**Why this task exists.** My analysis claimed the 8-bit XOR `__byte_sum` catches
-"~255/256 of random corruption." That is **wrong in the direction that matters**,
-and the harness must measure the real number:
+**Files:** `Makefile`, `.github/workflows/test.yml`
 
-```c
-__sum ^= *(unsigned long *)__ptr;   /* struct.h:947 — XOR of 8-byte words */
-```
-
-For a **single-bit flip**, XOR detects **100%** — the sum always changes. The
-actual blind spots are *structured* corruptions:
-
-| Corruption | XOR `__byte_sum` detects? |
-|---|---|
-| Single bit flipped | **Yes, always** |
-| Two identical words swapped | **No** |
-| A word duplicated over a neighbour | **No** |
-| Whole 8-byte block copied elsewhere | **No** |
-| Byte transposition within a word | **Often no** |
-| Two independent bit flips that XOR to zero | **No** |
-
-This is the class that real hardware produces — a SATA link glitch, a controller
-copy-forward, a torn write that duplicates a sector. **Random-bit testing would
-show 100% and falsely conclude the checksum is fine.**
-
-- [ ] **Step 1: Write `tests/corrupt.py`** taking a class name and applying it at
-  a given offset: `bitflip`, `word_swap`, `word_dup`, `block_copy`,
-  `byte_transpose`, `xor_cancel`, `zero_out`.
-
-- [ ] **Step 2: Write `tests/detect.sh`** that, for each corruption class × each
-  metadata target (superblock, txblock, cct, fnode block, dnode, apage), applies
-  the corruption to a copy and records whether `spadfsck -n` exits non-zero.
-
-- [ ] **Step 3: Produce the baseline table** and save it to
-  `tests/BASELINE-checksum-detection.md`. This is the artifact Phase 1 argues from.
-
-  Run: `bash tests/detect.sh | tee tests/BASELINE-checksum-detection.md`
-  Expected: a matrix with a detect-rate per class.
-
-  **Read the result as combined detection, not checksum-only.** The XOR
-  `__byte_sum` is *provably* blind to word swaps and block copies — XOR is
-  commutative and associative, so reordering whole 8-byte words leaves the sum
-  identical. But `spadfsck` also runs structural validation (magic numbers,
-  range checks, `cc`/`txc` ordering, monotonicity), which may catch those cases
-  independently. So the measured rate is the **floor of the combined detector**,
-  and any class showing high detection must be checked for *which* layer caught
-  it. Record both: checksum-blindness and structural-detection, per class.
-
-  If a class shows 100% detection, confirm whether the checksum contributed at
-  all — if not, that class is unprotected on volumes mounted `--no-checksums`.
-
-- [ ] **Step 4: Commit** `test: add structured corruption harness and checksum baseline`
-
----
-
-### Task 0.4: Make target and CI
-
-**Files:**
-- Modify: `Makefile`
-- Create: `.github/workflows/test.yml`
-
-- [ ] **Step 1: Add `make test`** depending on the userspace tools only
-  (`mkspadfs spadfsck`), running 0.2 then 0.3. It must **not** require root.
-
-- [ ] **Step 2: Add a GitHub Actions job** — `ubuntu-latest`, `make` then
-  `make test`, no privileged steps. Upload the baseline table as an artifact.
-
-- [ ] **Step 3: Verify locally** `make test` passes end to end.
-
-- [ ] **Step 4: Commit** `ci: run unprivileged spadfs test suite on push`
+- [ ] **Step 1:** `make test` → 0.2 + 0.3, **no root required**.
+- [ ] **Step 2:** CI job on `ubuntu-latest`: `make`, `make test`, upload the
+  baseline table as an artifact. `make test-ref` is a separate,
+  `allow_failure: true` privileged job (GitHub-hosted runners cannot `insmod`).
+- [ ] **Step 3:** Verify `make test` passes locally end to end.
+- [ ] **Step 4:** Commit `ci: run unprivileged spadfs test suite on push`
 
 ---
 
 ## Review Focus
 
-Failure modes the spec implies but no single task's happy path exercises:
-
-1. **Silent kernel/fsck divergence** — a structure accepted by `spadfsck` but
-   rejected by the driver (or vice versa) is invisible until a crash. *Mitigation:*
-   Phase 1+ requires both parsers change in the same commit; 0.2's matrix is the
-   only cross-check available unprivileged.
-2. **Checksum disabled volumes** — `--no-checksums` sets
-   `FLAG_COMPAT_FSCK_NO_CHECKSUMS`; a corruption test that assumes checksums on
-   will report false confidence. *Task 0.3 must run each class under both.*
-3. **Compat-bit asymmetry** — old driver reading new volume must **refuse**, not
-   misread. Refusing is safe; misreading is data loss. *No unprivileged test can
-   prove this; it needs two driver versions. Flagged as a Phase 1 design
-   requirement, not a Phase 0 gap.*
-4. **Sparse-image false negatives** — `dd` sparse files read back as zeros, so a
-   corruption that writes zeros may be indistinguishable from untouched space.
-   *Task 0.1 should use a non-zero fill pattern.*
-5. **The `cct` mirror desync case** — if a backup table is added but not updated
-   on every commit, it becomes worse than nothing: a stale copy that looks valid.
-   *This is the central risk of Phase 1's #2 and must be designed in, not tested
-   into.*
-
----
-
-## Blocking questions
-
-Phases 1–3 cannot be responsibly detailed until these are answered.
-
-1. **Upstream or fork?** Is the intent to contribute these to Mikuláš Patočka, to
-   maintain a divergent fork, or is this a research sandbox? Format-affecting
-   changes are *hostile* to a mirror — they make our images unreadable by upstream
-   and vice versa. This single answer changes the plan for 1–3 completely.
-
-2. **Must existing v1.0.22 volumes keep mounting?** If yes, every change is
-   constrained to additive, flag-gated, read-compatible forms. If no, we can
-   consider real fixes (e.g. widening `cc` past 16 bits) that are otherwise
-   impossible.
-
-3. **Licensing is still unresolved.** We have no confirmed right to redistribute
-   modified versions. GPL would permit it with source; nothing is confirmed.
-   Should Phase 1 start before that is settled?
-
-4. **Is there a real workload behind this?** The hash-quality question (#4) is
-   only worth a full directory-rebuild migration if someone has large directories
-   exhibiting clustering. Without a workload, it is speculation.
-
-5. **Who owns the mirror-authored docs' license** (`DESIGN-ANALYSIS.md`,
-   `AGENTS.md`, `CREDITS`, `LICENSE`)? They are not upstream content and should
-   not silently inherit whatever the code gets.
+1. **Silent kernel/fsck divergence.** Every metadata structure is parsed twice —
+   in the driver and in `utils/spadfsck/`. Changing one without the other is
+   invisible until a crash. *Mitigation: every phase must change both in the same
+   commit; 0.2's matrix is the only unprivileged cross-check.*
+2. **Checksum-disabled volumes.** `--no-checksums` sets
+   `FLAG_COMPAT_FSCK_NO_CHECKSUMS`. Detection rates measured only with
+   checksums on overstate real protection. *0.3 runs every class under both.*
+3. **Reference rig false equivalence.** If the modernized `mkspadfs` is used to
+   create a volume mounted by `spadfsref.ko` (or vice versa), results are
+   garbage, not comparable. *0.4 Step 2 must keep each stack's toolchain paired
+   and isolated; assert the fs type on every mount.*
+4. **Sparse-image false negatives.** `dd` sparse files read back as zeros, so a
+   zero-writing corruption is indistinguishable from untouched space.
+   *0.1 Step 2 uses a non-zero fill pattern.*
+5. **Backup-table desync.** If a mirrored cct (Phase 2) is not updated on every
+   commit it becomes worse than no backup: a stale copy that validates.
+   *Phase 2 design requirement, not a Phase 0 test.*
+6. **Widening `cc` changes struct sizes and thus all offsets.** Phase 3 touches
+   `fnode`, `apage_head`, `dnode_page`, `fnode_block`, `txblock`. Any missed
+   `FNODE_*_POS`-style derived constant silently corrupts layout.
+   *Re-run 0.2's full matrix after Phase 3, and diff `sizeof()` assertions —
+   `spadfs_struct_check_correctness()` in mkspadfs already does some of this.*
 
 ---
 
-## Recommendation
+## Next step
 
-**Do Phase 0 now.** It is format-neutral, unprivileged, CI-able, useful under
-every answer to the five questions, and it is the only thing that turns the
-checksum argument from my assertion into a measured number. It also happens to
-be the highest-value contribution to upstream of anything on this list — nobody
-else has tests for this filesystem.
+Phase 0 is unblocked and should be executed first — it is format-neutral, mostly
+unprivileged, and it is the only thing that makes every later phase measurable
+rather than argued.
 
-Then get answers to Q1 and Q2 before writing a single line of Phase 1.
+Phases 1–5 each need their own plan, written after Phase 0 produces the baseline
+numbers. In particular **Phase 4 should not be designed before 0.4's rig can
+answer whether the current hash actually clusters** — that measurement may make
+the whole item moot, or may show it is worse than assumed.
