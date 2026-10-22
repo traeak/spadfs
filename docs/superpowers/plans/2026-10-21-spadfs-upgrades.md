@@ -248,6 +248,41 @@ and tool names, so **both install permanently on one host**.
 
 ---
 
+## Findings from Phase 0 execution
+
+Produced by `tests/detect.sh` (see `tests/BASELINE-checksum-detection.md`) and
+follow-up source inspection. All verified, not inferred.
+
+1. **`spadfsck -n` short-circuits.** On a volume with no recorded error flag it
+   prints "filesystem is clean, no checking needed" and exits 0 **without
+   traversing**. Every detector in this harness must use `-n -f`. A baseline built
+   on bare `-n` would have reported the entire filesystem as blind — it is not.
+
+2. **5 corruption classes are not detected at all:**
+
+   | Target | Class |
+   |---|---|
+   | superblock | `byte_transpose` |
+   | txblock | `byte_transpose`, `block_copy` |
+   | apage_index | `byte_transpose`, `block_copy` |
+
+   `root_dir` detected every class. The pattern is not random — it is worth
+   understanding before Phase 2 rather than assuming crc32c fixes all five.
+
+3. **The crash-count table has no checksum.** `super.c:722` writes the cct
+   sector with a plain `spadfs_memcpy`; there is no `__byte_sum` or equivalent
+   anywhere on that path, unlike the superblock and txblock. Combined with it
+   having no backup copy, **the single most load-bearing structure in the
+   filesystem — every `CC_VALID()` decision routes through it — is the only one
+   with neither a checksum nor redundancy.** This is a stronger justification
+   for Phase 3 than the original analysis stated.
+
+4. **`cct` corruption is untestable on a fresh volume.** The table is all zeros
+   until transactions occur; populating it requires mounting, which needs root.
+   Phase 3 needs a privileged fixture or a synthesised primed table.
+
+---
+
 ## Review Focus
 
 1. **Silent kernel/fsck divergence.** Every metadata structure is parsed twice —
