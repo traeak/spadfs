@@ -1,0 +1,83 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+# Least privilege: this workflow only needs to read the repo and upload
+# artifacts. Never grant write/admin by default.
+permissions:
+  contents: read
+
+jobs:
+  unprivileged:
+    name: Round-trip + corruption baseline (no root)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # artipacked: don't leave a credential-bearing git remote behind.
+          persist-credentials: false
+
+      - name: Install build deps
+        run: >-
+          sudo apt-get update
+
+          sudo apt-get install -y --no-install-recommends
+          build-essential python3
+
+      # Userspace tools only. The kernel module is deliberately NOT built here:
+      # it needs matching kernel headers, and the point of this suite is that it
+      # verifies format behaviour without loading anything.
+      - name: Build mkspadfs and spadfsck
+        run: make mkspadfs spadfsck
+
+      - name: Round-trip matrix
+        run: bash tests/roundtrip.sh
+
+      - name: Structured corruption detection baseline
+        run: bash tests/detect.sh > baseline.md
+
+      - name: Show summary
+        run: tail -n 8 baseline.md
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checksum-detection-baseline
+          path: baseline.md
+
+  module-build:
+    name: Kernel module build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install kernel headers
+        run: >-
+          sudo apt-get update
+
+          sudo apt-get install -y --no-install-recommends
+          linux-headers-generic
+
+      - name: Build spadfs.ko
+        run: make spadfs.module
+
+      - name: Baseline warning check
+        run: |
+          set -euo pipefail
+          kdir="/lib/modules/$(uname -r)/build"
+          out="$(make -C "$kdir" M="$PWD" \
+                  STANDALONE_BUILD=y CONFIG_SPADFS_FS=m 2>&1 || true)"
+          # The only accepted warning is the long-standing missing
+          # MODULE_DESCRIPTION. Anything else is a regression.
+          new="$(printf '%s\n' "$out" \
+                  | grep -i 'warning' \
+                  | grep -v 'MODULE_DESCRIPTION' || true)"
+          if [ -n "$new" ]; then
+            printf 'New warnings introduced:\n%s\n' "$new"
+            exit 1
+          fi
+          printf 'No new warnings.\n'

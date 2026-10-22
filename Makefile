@@ -69,6 +69,17 @@ clean-userspace:
 
 clean : clean-kernel clean-userspace
 
+# Unprivileged test suite: no root, no loop devices, no module loading.
+# Depends only on the userspace tools, so CI can run it without kernel headers.
+test : mkspadfs spadfsck
+	bash tests/roundtrip.sh
+	bash tests/detect.sh > tests/BASELINE-checksum-detection.md
+	@echo "regenerated tests/BASELINE-checksum-detection.md"
+
+# NOTE: `test-ref` (side-by-side spadfs/spadfs2 reference comparison, plan task
+# 0.4) is not defined yet -- it needs root for insmod/mount and is deliberately
+# kept out of the unprivileged suite.
+
 install : install-kernel install-userspace
 
 install-kernel : spadfs.module
