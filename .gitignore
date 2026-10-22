@@ -21,3 +21,4 @@ modules.order
 spadfs.mod
 # Leading slash: the built binary at repo root only, NOT the utils/spadfsck/ source dir.
 /spadfsck
+__pycache__/
