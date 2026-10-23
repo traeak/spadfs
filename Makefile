@@ -74,7 +74,8 @@ clean : clean-kernel clean-userspace
 test : mkspadfs spadfsck
 	bash tests/roundtrip.sh
 	bash tests/detect.sh > tests/BASELINE-checksum-detection.md
-	@echo "regenerated tests/BASELINE-checksum-detection.md"
+	bash tests/cct_integrity.sh > tests/BASELINE-cct-integrity.md
+	@echo "regenerated both BASELINE files in tests/"
 
 # NOTE: `test-ref` (side-by-side spadfs/spadfs2 reference comparison, plan task
 # 0.4) is not defined yet -- it needs root for insmod/mount and is deliberately

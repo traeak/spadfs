@@ -54,14 +54,10 @@ def find_live_base(u):
     return None
 
 
-def corrupt_unit(u, cls):
-    """Mutate a 512-byte bytearray in place. Returns False if nothing is live."""
-    base = find_live_base(u)
-    if base is None:
-        return False
-    a, b, c = base + 16, base + 24, base + 32
-    blk_src, blk_dst = base + 48, base + 112
-
+def apply_class(u, cls, a, b, c, blk_src, blk_dst):
+    """Mutate u at explicitly supplied offsets. Split out so a caller can pin
+    the anchor exactly (e.g. straight at cct[tx.cc]) instead of relying on a
+    search that could drift to some other live byte."""
     if cls == "bitflip":
         u[a] ^= 0x01
     elif cls == "byte_transpose":
@@ -82,11 +78,29 @@ def corrupt_unit(u, cls):
         u[a:a + 64] = bytes(64)
     else:
         raise ValueError(f"unknown corruption class: {cls}")
+
+
+def corrupt_unit(u, cls):
+    """Mutate a 512-byte bytearray in place. Returns False if nothing is live."""
+    base = find_live_base(u)
+    if base is None:
+        return False
+    apply_class(u, cls, base + 16, base + 24, base + 32, base + 48, base + 112)
     return True
 
 
-def target_region(info, target):
-    """(base_sector, extent_sectors) for a named structure.
+def live_cc(path, info):
+    """tx.cc -- the current crash-count index, read from the txblock.
+
+    struct txblock (struct.h:134) puts cc at byte offset 6.
+    """
+    with open(path, "rb") as f:
+        f.seek(info["txblock"] * SECTOR + 6)
+        return int.from_bytes(f.read(2), "little")
+
+
+def target_region(path, info, target):
+    """(base_sector, extent_sectors, anchor_override_or_None) for a structure.
 
     Extents matter: several of these structures occupy only block_sectors (8
     sectors on a 4KiB block). Without a bound, a forward search for "live" bytes
@@ -97,35 +111,50 @@ def target_region(info, target):
     Derived from utils/mkspadfs/mkspadfs.c:331-339.
     """
     blk = 1 << info["sectors_per_block_bits"]
+    cc = live_cc(path, info)
+    # Byte offset of cct[cc] within its 512-byte sector.
+    cc_in_sector = (cc * 4) % SECTOR
     table = {
-        "superblock": (SUPERBLOCK_SECTOR, blk),
-        "txblock": (info["txblock"], blk),
+        "superblock": (SUPERBLOCK_SECTOR, blk, None),
+        "txblock": (info["txblock"], blk, None),
         "apage_index": (info["apage_index0"],
-                        info["apage_index1"] - info["apage_index0"]),
+                        info["apage_index1"] - info["apage_index0"], None),
         # CCT_SIZE is 65536*4 bytes = 512 sectors; marked "do not change it".
-        "cct": (info["cct"], 512),
+        "cct": (info["cct"], 512, None),
+        # The live entry. cct[tx.cc] is what every CC_VALID() decision reads,
+        # and it is guarded by no checksum and by no ordering rule -- the rule
+        # in sckcct.c only constrains entries ABOVE cc. Pin the anchor so we
+        # hit that entry and nothing else.
+        "cct_live": (info["cct"] + (cc * 4) // SECTOR, 1, cc_in_sector),
         # sb.root points at the root FIXED FNODE, not the directory.
-        "root_fnode": (info["root"], blk),
+        "root_fnode": (info["root"], blk, None),
         # root_dir_sector = fnode_align(root_fnode + block_sectors, ROOT_DIR_SECTORS)
         # and ROOT_DIR_SECTORS == block_sectors (mkspadfs.c:86).
-        "root_dir": (info["root"] + blk, blk),
+        "root_dir": (info["root"] + blk, blk, None),
     }
     if target not in table:
         raise ValueError(f"unknown target: {target} (have: {', '.join(sorted(table))})")
     return table[target]
 
 
-def target_offset(info, target):
-    return target_region(info, target)[0] * SECTOR
+def target_offset(path, info, target):
+    return target_region(path, info, target)[0] * SECTOR
 
 
 def main():
-    if len(sys.argv) != 4:
-        sys.exit("usage: corrupt.py <image> <target> <class>")
+    if len(sys.argv) not in (4, 6):
+        sys.exit("usage: corrupt.py <image> <target> <class> [--at <byte_off>]")
     path, target, cls = sys.argv[1], sys.argv[2], sys.argv[3]
+    pinned = None
+    if len(sys.argv) == 6:
+        if sys.argv[4] != "--at":
+            sys.exit(f"corrupt.py: unknown option {sys.argv[4]}")
+        pinned = int(sys.argv[5])
 
     info = read_super(path)
-    base_sector, extent = target_region(info, target)
+    base_sector, extent, anchor = target_region(path, info, target)
+    if pinned is not None:
+        anchor = pinned
 
     # Search within the structure's real extent only. Its leading units can be
     # all-zero (e.g. the unused tail of the crash-count table), so look for a
@@ -138,11 +167,18 @@ def main():
             if len(unit_bytes) < SECTOR:
                 break
             before = bytes(unit_bytes)
-            corrupt_unit(unit_bytes, cls)
+            if anchor is None:
+                corrupt_unit(unit_bytes, cls)
+            else:
+                # Pinned anchor: corrupt exactly where we say, so a target like
+                # cct_live cannot drift to some other live byte.
+                apply_class(unit_bytes, cls, anchor, anchor + 8,
+                          anchor + 16, anchor + 32, anchor + 112)
             if bytes(unit_bytes) != before:
                 f.seek(off)
                 f.write(unit_bytes)
-                print(f"changed at {target}/{cls} byte={off} sector={base_sector + unit} unit={unit}/{extent}")
+                print(f"changed at {target}/{cls} byte={off + anchor if anchor is not None else off} "
+                      f"sector={base_sector + unit} unit={unit}/{extent}")
                 return 0
         print("noop")
         return 3

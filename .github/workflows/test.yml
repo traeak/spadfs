@@ -38,14 +38,26 @@ jobs:
       - name: Structured corruption detection baseline
         run: bash tests/detect.sh > baseline.md
 
+      - name: Crash-count table integrity baseline
+        run: bash tests/cct_integrity.sh > cct-baseline.md
+
       - name: Show summary
-        run: tail -n 8 baseline.md
+        run: |
+          tail -n 8 baseline.md
+          echo '--- cct ---'
+          tail -n 12 cct-baseline.md
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: checksum-detection-baseline
           path: baseline.md
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cct-integrity-baseline
+          path: cct-baseline.md
 
   module-build:
     name: Kernel module build

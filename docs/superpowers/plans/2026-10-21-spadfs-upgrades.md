@@ -295,15 +295,40 @@ Three consequences:
   "the checksum is doing almost none of the work, and when a corruption is both
   XOR-preserving *and* structurally plausible, nothing fires."
 
-### 3. The crash-count table has no checksum
+### 3. The crash-count table has no checksum — and the consequence is semantic
 
 `super.c:722` writes the cct sector with a plain `spadfs_memcpy`; there is no
 `__byte_sum` or equivalent anywhere on that path, unlike the superblock
 (`super.c:507`) and the fnode blocks. Combined with having no backup copy,
 **the single most load-bearing structure in the filesystem — every `CC_VALID()`
 decision routes through it — is the only one with neither a checksum nor
-redundancy.** This is a stronger justification for Phase 3 than the original
-analysis stated.
+redundancy.**
+
+This is no longer just a source-reading claim. `tests/cct_integrity.sh` primes a
+volume to a plausible post-mount state (`tx.cc=4`, `cct[cc]=1776`) and corrupts
+the live entry in place:
+
+| Class | `cct[cc]` after | delta | `CC_VALID` | fsck |
+|---|---|---|---|---|
+| bitflip | 1777 | +1 | True | **silent** |
+| byte_transpose | 61446 | +59 670 | True | **silent** |
+| zero_out | 0 | −1776 | **False** | **silent** |
+| word_swap | 0 | −1776 | False | detected (rc=4) |
+| word_dup | 1776 | 0 | True | detected (rc=4) |
+| xor_cancel | 1777 | +1 | True | detected (rc=4) |
+
+Two things to read off this table:
+
+* **`zero_out` silently inverts `CC_VALID` from True to False.** The core
+  validity predicate of the filesystem changes its answer and `spadfsck -n -f`
+  reports the volume clean. That is not a cosmetic gap.
+* **The detections that do happen are not the checksum's doing.** They come from
+  the ordering rule in `sckcct.c:45-56` — entries *above* `tx.cc` must be zero.
+  Any class that spills above `cc` trips that rule; any class confined to
+  `cct[cc]` itself is invisible. Confirmed by the pinned-anchor runs: every
+  silent case landed at byte 8 486 928, exactly `cct_base + cc*4`.
+
+So the cct's only integrity protection is a bound that guards the wrong region.
 
 ### 4. A correction: the "5 undetected classes" were a harness bug
 
@@ -321,17 +346,29 @@ fsck correctly has nothing to verify. The misses were measuring the wrong
 address, not the wrong property.
 
 Fixed by deriving real extents from `mkspadfs.c:331-339` into
-`corrupt.target_region()` and splitting `root_fnode` from `root_dir`. The
-corrected run is 42 cases: **25 detected, 0 not detected, 17 not applicable.**
+`corrupt.target_region()`, splitting `root_fnode` from `root_dir`, and adding a
+pinned-anchor mode (`--at`) so a target cannot drift. Retained here because the
+failure mode is easy to repeat and worth naming: **a corruption harness that
+cannot prove *where* it wrote is worse than no harness.**
 
-Retained here because the failure mode is easy to repeat and worth naming: a
-corruption harness that cannot prove *where* it wrote is worse than no harness.
+### 5. Priming makes the cct testable without root
 
-### 5. `cct` corruption is still untestable on a fresh volume
+The table is all zeros on a fresh volume, so every class used to return NOOP and
+the finding above could not be exercised. `tests/prime.py` solves this without
+mounting:
 
-The table is all zeros until transactions occur, so every class returns NOOP.
-Populating it requires mounting, which needs root. Phase 3 needs either a
-privileged fixture or a synthesised primed table.
+* sets `tx.cc` in the txblock and **restripes the txblock checksum** so the
+  volume stays valid — the invariant is `XOR(all 512 bytes) == CHECKSUM_BASE`
+  (`'C'`, `struct.h:29`), derived from `tb->checksum ^= CHECKSUM_BASE ^
+  __byte_sum(tb, 512)` at `super.c:507`
+* writes plausible counts into `cct[0..cc]` that satisfy the fsck rules: top
+  bit clear at or below `cc`, zero above it
+* the test asserts the primed volume is still clean before corrupting it, so a
+  fixture bug cannot masquerade as a filesystem finding
+
+The same restripe trick is the general answer to isolating checksum-vs-structural
+coverage on any SpadFS block, and should be used in Phase 2 to verify that a new
+checksum actually buys something rather than being masked by structural checks.
 
 ---
 
@@ -344,7 +381,10 @@ Ranked by the evidence above, not by intuition:
 2. **Use a real CRC, not an XOR fold.** XOR has zero burst-error property; a
    CRC-32C gives distance-4 over ~65 KB and hardware acceleration on every
    target CPU.
-3. **Add a checksum to the cct.** Currently none exists.
+3. **Add a checksum to the cct, and back it up.** Currently it has neither, and
+   `zero_out` on the live entry flips `CC_VALID` with no complaint at all. This
+   is now the highest-priority fix in the list — it is the only place where a
+   silent corruption changes a validity decision rather than just data.
 4. **Do not rely on structural checks as the de-facto integrity layer.** They
    are incidental coverage, not designed coverage, and they will not catch a
    corruption that happens to look plausible.

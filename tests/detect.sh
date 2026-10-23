@@ -28,12 +28,21 @@ set -uo pipefail
 require_tools
 
 SIZE="${TEST_IMAGE_SIZE:-16M}"
-TARGETS=(superblock txblock apage_index cct root_fnode root_dir)
+TARGETS=(superblock txblock apage_index cct cct_live root_fnode root_dir)
 CLASSES=(bitflip byte_transpose word_swap word_dup block_copy xor_cancel zero_out)
 
 base_for() {
 	local mode="$1" img="$WORKDIR/base-$mode.img"
-	[ -f "$img" ] || make_image "$img" "$SIZE" "--$mode" || die "base $mode failed"
+	if [ ! -f "$img" ]; then
+		make_image "$img" "$SIZE" "--$mode" || die "base $mode failed"
+		# Prime the crash-count table. On a fresh volume it is all zeros, so
+		# every cct class is a no-op and the target tests nothing. Priming gives
+		# it plausible post-mount contents (see tests/prime.py).
+		python3 "$TESTS_DIR/prime.py" "$img" --cc 4 --base-txc 1388 \
+			|| die "priming base $mode failed"
+		# Priming must not itself break the volume.
+		check_clean "$img" -n || die "primed base $mode is not clean"
+	fi
 	printf '%s' "$img"
 }
 
