@@ -28,7 +28,7 @@ set -uo pipefail
 require_tools
 
 SIZE="${TEST_IMAGE_SIZE:-16M}"
-TARGETS=(superblock txblock cct apage_index root_dir)
+TARGETS=(superblock txblock apage_index cct root_fnode root_dir)
 CLASSES=(bitflip byte_transpose word_swap word_dup block_copy xor_cancel zero_out)
 
 base_for() {

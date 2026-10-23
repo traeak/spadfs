@@ -85,17 +85,38 @@ def corrupt_unit(u, cls):
     return True
 
 
-def target_offset(info, target):
+def target_region(info, target):
+    """(base_sector, extent_sectors) for a named structure.
+
+    Extents matter: several of these structures occupy only block_sectors (8
+    sectors on a 4KiB block). Without a bound, a forward search for "live" bytes
+    walks straight past the structure into its neighbour, so the reported target
+    is a lie. Measured here: a "txblock" corruption landed at sector 16408,
+    which is apage_index1, not the txblock at 16392.
+
+    Derived from utils/mkspadfs/mkspadfs.c:331-339.
+    """
+    blk = 1 << info["sectors_per_block_bits"]
     table = {
-        "superblock": SUPERBLOCK_SECTOR * SECTOR,
-        "txblock": info["txblock"] * SECTOR,
-        "cct": info["cct"] * SECTOR,
-        "apage_index": info["apage_index0"] * SECTOR,
-        "root_dir": info["root"] * SECTOR,
+        "superblock": (SUPERBLOCK_SECTOR, blk),
+        "txblock": (info["txblock"], blk),
+        "apage_index": (info["apage_index0"],
+                        info["apage_index1"] - info["apage_index0"]),
+        # CCT_SIZE is 65536*4 bytes = 512 sectors; marked "do not change it".
+        "cct": (info["cct"], 512),
+        # sb.root points at the root FIXED FNODE, not the directory.
+        "root_fnode": (info["root"], blk),
+        # root_dir_sector = fnode_align(root_fnode + block_sectors, ROOT_DIR_SECTORS)
+        # and ROOT_DIR_SECTORS == block_sectors (mkspadfs.c:86).
+        "root_dir": (info["root"] + blk, blk),
     }
     if target not in table:
         raise ValueError(f"unknown target: {target} (have: {', '.join(sorted(table))})")
     return table[target]
+
+
+def target_offset(info, target):
+    return target_region(info, target)[0] * SECTOR
 
 
 def main():
@@ -104,16 +125,14 @@ def main():
     path, target, cls = sys.argv[1], sys.argv[2], sys.argv[3]
 
     info = read_super(path)
-    base_off = target_offset(info, target)
+    base_sector, extent = target_region(info, target)
 
-    # Many structures are longer than one 512-byte unit and their leading units
-    # can be all-zero (e.g. the unused tail of the crash-count table). Search
-    # forward for a unit where the corruption actually changes bytes, so a
-    # NOOP means "this class cannot alter this kind of region" rather than
-    # "we happened to aim at padding".
+    # Search within the structure's real extent only. Its leading units can be
+    # all-zero (e.g. the unused tail of the crash-count table), so look for a
+    # unit the class can actually change -- but never leave the structure.
     with open(path, "rb+") as f:
-        for unit in range(64):
-            off = base_off + unit * SECTOR
+        for unit in range(extent):
+            off = (base_sector + unit) * SECTOR
             f.seek(off)
             unit_bytes = bytearray(f.read(SECTOR))
             if len(unit_bytes) < SECTOR:
@@ -123,7 +142,7 @@ def main():
             if bytes(unit_bytes) != before:
                 f.seek(off)
                 f.write(unit_bytes)
-                print(f"changed at {target}/{cls} byte={off} unit={unit}")
+                print(f"changed at {target}/{cls} byte={off} sector={base_sector + unit} unit={unit}/{extent}")
                 return 0
         print("noop")
         return 3

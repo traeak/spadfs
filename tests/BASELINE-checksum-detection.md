@@ -9,19 +9,26 @@ target whose contents the class can actually change.
 | Target | Class | checksums | no-checksums | Result |
 |---|---|---|---|---|
 | superblock | bitflip | DETECTED | DETECTED | detected |
-| superblock | byte_transpose | MISSED | MISSED | **NOT DETECTED** |
+| superblock | byte_transpose | NOOP | NOOP | n/a (no live bytes to change) |
 | superblock | word_swap | DETECTED | DETECTED | detected |
 | superblock | word_dup | DETECTED | DETECTED | detected |
 | superblock | block_copy | DETECTED | DETECTED | detected |
 | superblock | xor_cancel | DETECTED | DETECTED | detected |
 | superblock | zero_out | DETECTED | DETECTED | detected |
 | txblock | bitflip | DETECTED | DETECTED | detected |
-| txblock | byte_transpose | MISSED | MISSED | **NOT DETECTED** |
-| txblock | word_swap | DETECTED | DETECTED | detected |
-| txblock | word_dup | DETECTED | DETECTED | detected |
-| txblock | block_copy | MISSED | MISSED | **NOT DETECTED** |
+| txblock | byte_transpose | NOOP | NOOP | n/a (no live bytes to change) |
+| txblock | word_swap | NOOP | NOOP | n/a (no live bytes to change) |
+| txblock | word_dup | NOOP | NOOP | n/a (no live bytes to change) |
+| txblock | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
 | txblock | xor_cancel | DETECTED | DETECTED | detected |
-| txblock | zero_out | DETECTED | DETECTED | detected |
+| txblock | zero_out | NOOP | NOOP | n/a (no live bytes to change) |
+| apage_index | bitflip | DETECTED | DETECTED | detected |
+| apage_index | byte_transpose | NOOP | NOOP | n/a (no live bytes to change) |
+| apage_index | word_swap | DETECTED | DETECTED | detected |
+| apage_index | word_dup | DETECTED | DETECTED | detected |
+| apage_index | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
+| apage_index | xor_cancel | DETECTED | DETECTED | detected |
+| apage_index | zero_out | DETECTED | DETECTED | detected |
 | cct | bitflip | NOOP | NOOP | n/a (no live bytes to change) |
 | cct | byte_transpose | NOOP | NOOP | n/a (no live bytes to change) |
 | cct | word_swap | NOOP | NOOP | n/a (no live bytes to change) |
@@ -29,24 +36,24 @@ target whose contents the class can actually change.
 | cct | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
 | cct | xor_cancel | NOOP | NOOP | n/a (no live bytes to change) |
 | cct | zero_out | NOOP | NOOP | n/a (no live bytes to change) |
-| apage_index | bitflip | DETECTED | DETECTED | detected |
-| apage_index | byte_transpose | MISSED | MISSED | **NOT DETECTED** |
-| apage_index | word_swap | DETECTED | DETECTED | detected |
-| apage_index | word_dup | DETECTED | DETECTED | detected |
-| apage_index | block_copy | MISSED | MISSED | **NOT DETECTED** |
-| apage_index | xor_cancel | DETECTED | DETECTED | detected |
-| apage_index | zero_out | DETECTED | DETECTED | detected |
+| root_fnode | bitflip | DETECTED | DETECTED | detected |
+| root_fnode | byte_transpose | DETECTED | DETECTED | detected |
+| root_fnode | word_swap | DETECTED | DETECTED | detected |
+| root_fnode | word_dup | DETECTED | DETECTED | detected |
+| root_fnode | block_copy | DETECTED | DETECTED | detected |
+| root_fnode | xor_cancel | DETECTED | DETECTED | detected |
+| root_fnode | zero_out | DETECTED | DETECTED | detected |
 | root_dir | bitflip | DETECTED | DETECTED | detected |
-| root_dir | byte_transpose | DETECTED | DETECTED | detected |
+| root_dir | byte_transpose | NOOP | NOOP | n/a (no live bytes to change) |
 | root_dir | word_swap | DETECTED | DETECTED | detected |
 | root_dir | word_dup | DETECTED | DETECTED | detected |
-| root_dir | block_copy | DETECTED | DETECTED | detected |
+| root_dir | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
 | root_dir | xor_cancel | DETECTED | DETECTED | detected |
 | root_dir | zero_out | DETECTED | DETECTED | detected |
 
 ## Summary
 
-- cases attempted: 35
-- detected: 23
-- **NOT detected: 5**
-- not applicable / harness error: 7
+- cases attempted: 42
+- detected: 25
+- **NOT detected: 0**
+- not applicable / harness error: 17

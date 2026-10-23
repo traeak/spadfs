@@ -253,33 +253,101 @@ and tool names, so **both install permanently on one host**.
 Produced by `tests/detect.sh` (see `tests/BASELINE-checksum-detection.md`) and
 follow-up source inspection. All verified, not inferred.
 
-1. **`spadfsck -n` short-circuits.** On a volume with no recorded error flag it
-   prints "filesystem is clean, no checking needed" and exits 0 **without
-   traversing**. Every detector in this harness must use `-n -f`. A baseline built
-   on bare `-n` would have reported the entire filesystem as blind — it is not.
+### 1. `spadfsck -n` short-circuits
 
-2. **5 corruption classes are not detected at all:**
+On a volume with no recorded error flag it prints "filesystem is clean, no
+checking needed" and exits 0 **without traversing**. Every detector in this
+harness must use `-n -f`. A baseline built on bare `-n` reports the entire
+filesystem as blind — it is not.
 
-   | Target | Class |
-   |---|---|
-   | superblock | `byte_transpose` |
-   | txblock | `byte_transpose`, `block_copy` |
-   | apage_index | `byte_transpose`, `block_copy` |
+### 2. `__byte_sum` is literally the XOR of every byte in the block
 
-   `root_dir` detected every class. The pattern is not random — it is worth
-   understanding before Phase 2 rather than assuming crc32c fixes all five.
+`struct.h:947` XORs 8-byte words, then folds `>>32 >>16 >>8` to the low byte.
+Verified equivalent to a plain byte-wise XOR over 5 000 random 512-byte blocks.
+Three consequences:
 
-3. **The crash-count table has no checksum.** `super.c:722` writes the cct
-   sector with a plain `spadfs_memcpy`; there is no `__byte_sum` or equivalent
-   anywhere on that path, unlike the superblock and txblock. Combined with it
-   having no backup copy, **the single most load-bearing structure in the
-   filesystem — every `CC_VALID()` decision routes through it — is the only one
-   with neither a checksum nor redundancy.** This is a stronger justification
-   for Phase 3 than the original analysis stated.
+* **Any permutation of bytes within a block is invisible to it.** Swapping two
+  adjacent bytes yields a delta of `(x^y) | ((x^y)<<8)`, whose byte XOR is
+  `(x^y) ^ (x^y) = 0`. Confirmed over 200 000 random trials: zero produced a
+  changed sum. This is not a probability, it is a proof — and it applies to
+  *every* reordering, not just adjacent ones.
+* **It is 8 bits wide.** Measured escape rate for random multi-byte corruption:
 
-4. **`cct` corruption is untestable on a fresh volume.** The table is all zeros
-   until transactions occur; populating it requires mounting, which needs root.
-   Phase 3 needs a privileged fixture or a synthesised primed table.
+  | bytes changed | escape rate | predicted 1/256 |
+  |---|---|---|
+  | 1 | 0.00000 | — (always caught) |
+  | 2 | 0.00388 | 0.00391 |
+  | 4 | 0.00394 | 0.00391 |
+  | 8 | 0.00388 | 0.00391 |
+  | 16 | 0.00365 | 0.00391 |
+  | 64 | 0.00394 | 0.00391 |
+
+  A single corrupted byte is always caught. Beyond that it is a coin flip at
+  1-in-256. No Hamming-distance property, no burst-error protection — it is not
+  a CRC in any useful sense.
+* **Structural validation is load-bearing.** Many permutation-invisible
+  corruptions were still caught — by magic checks, field-range checks and
+  cross-references, not by the checksum. `word_swap` and `xor_cancel` came out
+  "DETECTED" on every target despite `xor_delta = 0x00`. fsck looks better than
+  its checksum alone deserves, and that balance is fragile.
+
+  This is the actual argument for Phase 2: not "the checksum misses things" but
+  "the checksum is doing almost none of the work, and when a corruption is both
+  XOR-preserving *and* structurally plausible, nothing fires."
+
+### 3. The crash-count table has no checksum
+
+`super.c:722` writes the cct sector with a plain `spadfs_memcpy`; there is no
+`__byte_sum` or equivalent anywhere on that path, unlike the superblock
+(`super.c:507`) and the fnode blocks. Combined with having no backup copy,
+**the single most load-bearing structure in the filesystem — every `CC_VALID()`
+decision routes through it — is the only one with neither a checksum nor
+redundancy.** This is a stronger justification for Phase 3 than the original
+analysis stated.
+
+### 4. A correction: the "5 undetected classes" were a harness bug
+
+An earlier revision of this document reported five classes as undetected
+(`byte_transpose` on superblock/txblock/apage_index, `block_copy` on
+txblock/apage_index). **That was wrong and the baseline has been regenerated.**
+
+Cause: the corruptor searched forward up to 64 units for "live" bytes without
+bounding itself to the target structure. Several of these structures are far
+smaller than that — the txblock is one 512-byte sector with only **5 non-zero
+bytes** on a fresh volume, and `sb.root` points at the root *fixed fnode*, not
+the root directory. The search therefore landed in neighbouring slack space
+(e.g. a "txblock" corruption at sector 16408, which is `apage_index1`) where
+fsck correctly has nothing to verify. The misses were measuring the wrong
+address, not the wrong property.
+
+Fixed by deriving real extents from `mkspadfs.c:331-339` into
+`corrupt.target_region()` and splitting `root_fnode` from `root_dir`. The
+corrected run is 42 cases: **25 detected, 0 not detected, 17 not applicable.**
+
+Retained here because the failure mode is easy to repeat and worth naming: a
+corruption harness that cannot prove *where* it wrote is worse than no harness.
+
+### 5. `cct` corruption is still untestable on a fresh volume
+
+The table is all zeros until transactions occur, so every class returns NOOP.
+Populating it requires mounting, which needs root. Phase 3 needs either a
+privileged fixture or a synthesised primed table.
+
+---
+
+## What Phase 2 Should Actually Fix
+
+Ranked by the evidence above, not by intuition:
+
+1. **Widen the checksum.** 8 bits → 32 bits changes the multi-byte escape rate
+   from 1/256 to 1/4 294 967 296. This is the single largest measurable gain.
+2. **Use a real CRC, not an XOR fold.** XOR has zero burst-error property; a
+   CRC-32C gives distance-4 over ~65 KB and hardware acceleration on every
+   target CPU.
+3. **Add a checksum to the cct.** Currently none exists.
+4. **Do not rely on structural checks as the de-facto integrity layer.** They
+   are incidental coverage, not designed coverage, and they will not catch a
+   corruption that happens to look plausible.
 
 ---
 
