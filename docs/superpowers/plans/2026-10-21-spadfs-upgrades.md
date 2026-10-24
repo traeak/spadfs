@@ -505,15 +505,70 @@ clean.
 
 ## Open decisions
 
-1. **Kernel floor for spadfs2.** `linux-compat.h` is ~350 lines of
-   `LINUX_VERSION_CODE` conditionals spanning 2.6.9 → 7.2 — five
-   `blkdev_issue_flush` signatures, `PASS_INODE`, `TEST_RHEL_VERSION`. This is
-   kernel-API drift, **not** format compatibility, so the `spadfs2` rename does
-   *not* remove it. But it is the single largest cruft source in the tree, and
-   the modernization branch is the natural place to drop it. Picking a floor
-   (e.g. ≥ 6.1 LTS) deletes most of `linux-compat.h` outright. **Needs a
-   decision before Phase 2**, since it changes which files every later phase
-   touches.
+1. **Kernel floor for spadfs2 — DECIDED: 6.1 LTS, distro-kernel support dropped.**
+   Executed; see the section below.
+
+---
+
+## Kernel floor — decided and executed
+
+`linux-compat.h`: **343 → 171 lines (172 deleted, 50%)**. Only four
+`LINUX_VERSION_CODE` gates remain, all forward-looking.
+
+### The rule that made the trim correct
+
+The floor is the **minimum**, and we still build against newer kernels. So:
+
+* `#if < X` shim → **delete** only when `X <= 6.1` (no supported kernel is older)
+* `#if >= X` gate → **keep** when `X` is above the floor, because it still fires
+  on kernels we build against
+
+Getting this backwards is how the first attempt broke the build: deleting the
+`>= 6.9` `SLAB_MEM_SPREAD` gate removed a shim that 7.2 genuinely needs.
+
+### What survived and why
+
+| Kept | Reason |
+|---|---|
+| `< 6.3` `mnt_idmap` → `user_namespace` | true at 6.1/6.2; needed for those kernels |
+| `< 6.6` `inode_get/set_ctime` | same |
+| `< 6.7` `inode_get/set_atime/mtime` | same |
+| `>= 6.9` `SLAB_MEM_SPREAD` | fires on 6.9+ including our 7.2 target |
+| `spadfs_cache_t`, `spadfs_free_cache` | **SpadFS-private** — the kernel has no such names |
+| `get_current_{uid,gid,fsuid,fsgid}()` | **SpadFS-private** — kept in the post-uid-namespaces form |
+| `spadfs_memcpy` / `spadfs_memmove` | `CONFIG_FORTIFY_SOURCE` workaround, not version-gated |
+
+Everything else was either a `< 6.1` shim or an API the modern kernel provides
+natively (`mutex_*`, `file_inode`, `kvfree`, `SB_RDONLY`, `inode_unlock`,
+`memcpy_and_pad`, `PTR_ALIGN`, `set_nlink`, `match_strlcpy`, `vprintk`, …).
+
+### Distro macros: stubbed, not deleted
+
+`TEST_RHEL_VERSION` had **14 call sites outside** `linux-compat.h` (super.c,
+file.c, inode.c, name.c, spadfs.h) and `TEST_STABLE_BRANCH` had 1. My original
+analysis only counted gates inside the compat header and badly under-scoped this.
+
+They are now `#define ... 0` stubs, so every `&& !TEST_RHEL_VERSION(...)` and
+`|| TEST_RHEL_VERSION(...)` folds at compile time with **zero edits to those 15
+sites**. Removing the dead conditions from the call sites is a follow-on
+cleanup — cosmetic now that the compiler handles it.
+
+### Verified
+
+Built clean against **three** kernels, per AGENTS.md Rule 2:
+
+| Kernel | Result |
+|---|---|
+| 6.18.58 | clean — only the known `MODULE_DESCRIPTION` warning |
+| 7.2.10 | clean |
+| 7.2.11 | clean |
+
+`make test` → 18/18 round-trip profiles pass.
+
+Note: 6.1 itself has headers on this machine but no `/lib/modules` entry, so the
+floor could not be built against directly. Verified on 6.18 and 7.2 instead.
+
+---
 2. **Licensing.** Still unresolved. `LICENSE` is a status notice, not a grant.
    A `spadfs2` fork with a new signature does not change that — confirm terms
    with the author before publishing the fork as usable.
