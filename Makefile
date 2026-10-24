@@ -4,7 +4,16 @@ ifndef CONFIG_SPADFS_FS
 #KERNELDIR := /usr/src/linux/
 KERNELDIR := /lib/modules/$(shell uname -r)/build
 
-all : spadfs.module mkspadfs spadfsck
+# --- spadfs2 tool identity -------------------------------------------
+# Binaries carry the "2" suffix so the v1.0.22 stack and this one can sit
+# side by side for the Phase 0.4 reference comparison. Build the old names
+# from this tree with:
+#     make SPADFS_NAME=spadfs SPADFS_TOOL_SUFFIX=
+SPADFS_TOOL_SUFFIX ?= 2
+MKFS_TOOL ?= mkspadfs$(SPADFS_TOOL_SUFFIX)
+FSCK_TOOL ?= spadfsck$(SPADFS_TOOL_SUFFIX)
+
+all : spadfs.module $(MKFS_TOOL) $(FSCK_TOOL)
 
 spadfs.module :
 	$(MAKE) -C $(KERNELDIR) M=`pwd` STANDALONE_BUILD=y CONFIG_SPADFS_FS=m
@@ -26,15 +35,24 @@ ifneq (,$(findstring direct,$(AIO)))
 AIO_CFLAGS += -DDEFAULT_DIRECT
 endif
 
+# Per-tool banner macro, so diagnostics name the binary that is actually running
+# instead of a hardcoded "SPADFSCK"/"MKSPADFS". These pattern rules are more
+# specific than the generic %.o rule below (shorter stem), so make prefers them.
+utils/spadfsck/%.o : utils/spadfsck/%.c
+	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) -DTOOL_BANNER='"$(FSCK_TOOL)"' -c -o $@ -x c $<
+
+utils/mkspadfs/%.o : utils/mkspadfs/%.c
+	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) -DTOOL_BANNER='"$(MKFS_TOOL)"' -c -o $@ -x c $<
+
 %.o : %.c
 	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) -c -o $@ -x c $<
 
-mkspadfs : \
+$(MKFS_TOOL) : \
 	utils/mounted.o \
 	utils/mkspadfs/mkspadfs.o
 	$(SPADFS_CC) $(SPADFS_CFLAGS) -o $@ $^
 
-spadfsck : \
+$(FSCK_TOOL) : \
 	utils/common.o \
 	utils/mounted.o \
 	utils/spadfsck/sck.o \
@@ -65,13 +83,13 @@ clean-kernel:
 	-rm -rf .tmp_versions/
 
 clean-userspace:
-	-rm -f */*.o */*/*.o mkspadfs spadfsck
+	-rm -f */*.o */*/*.o $(MKFS_TOOL) $(FSCK_TOOL)
 
 clean : clean-kernel clean-userspace
 
 # Unprivileged test suite: no root, no loop devices, no module loading.
 # Depends only on the userspace tools, so CI can run it without kernel headers.
-test : mkspadfs spadfsck
+test : $(MKFS_TOOL) $(FSCK_TOOL)
 	bash tests/roundtrip.sh
 	bash tests/detect.sh > tests/BASELINE-checksum-detection.md
 	bash tests/cct_integrity.sh > tests/BASELINE-cct-integrity.md
@@ -87,12 +105,12 @@ install-kernel : spadfs.module
 	$(MAKE) -C $(KERNELDIR) M=`pwd` STANDALONE_BUILD=y modules_install
 	depmod -a
 
-install-userspace : mkspadfs spadfsck
-	install mkspadfs spadfsck /sbin/
-	-strip /sbin/mkspadfs
-	-strip /sbin/spadfsck
-	ln -sf mkspadfs /sbin/mkfs.spadfs
-	ln -sf spadfsck /sbin/fsck.spadfs
+install-userspace : $(MKFS_TOOL) $(FSCK_TOOL)
+	install $(MKFS_TOOL) $(FSCK_TOOL) /sbin/
+	-strip /sbin/$(MKFS_TOOL)
+	-strip /sbin/$(FSCK_TOOL)
+	ln -sf $(MKFS_TOOL) /sbin/mkfs.spadfs2
+	ln -sf $(FSCK_TOOL) /sbin/fsck.spadfs2
 
 else
 

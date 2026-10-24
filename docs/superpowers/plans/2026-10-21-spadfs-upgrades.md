@@ -445,6 +445,64 @@ parity on the operation sequence, *before* any Phase 2 format change is applied.
 
 ---
 
+## Phase 1 — executed
+
+Landed on `modernization`. Verified: full clean build produces `spadfs2.ko`
+(`alias: fs-spadfs2`), `mkspadfs2`, `spadfsck2`, with only the known
+`MODULE_DESCRIPTION` warning; `make test` passes 18/18 round-trip profiles
+against the new format.
+
+| What | Where | Done |
+|---|---|---|
+| Format discriminator | `struct.h` | `SUPERBLOCK_SIGNATURE` → `"FS SPAD2"` (8 chars, fills `__u8[8]`) |
+| Version reset | `struct.h` | `1.0.22` → `1.0.0` — spadfs2's own numbering, not inherited |
+| Module / fs type | `Kbuild` | default `SPADFS_NAME = spadfs2`; override to `spadfs` for the reference rig |
+| Tool binaries | `Makefile` | `mkspadfs2` / `spadfsck2` via `SPADFS_TOOL_SUFFIX` |
+| Filesystem symlinks | `Makefile` | `mkfs.spadfs2` / `fsck.spadfs2` |
+| Tool banners | `utils/spadfsck/*.c`, `utils/mkspadfs/mkspadfs.c` | 16 literals now derive from one `-DTOOL_BANNER` macro |
+| Test harness | `tests/lib.sh` | tool paths env-overridable (`MKSPADFS`, `SPADFSCK`) so one suite drives either stack |
+
+### A latent overflow the signature change exposed
+
+`mkspadfs.c:459` wrote the signature with **`strcpy`**. The old value
+`"FS SPAD\000"` was 8 bytes *including* its terminator, so it fitted
+`__u8 signature[8]` exactly. The new `"FS SPAD2"` is 8 characters, so
+`strcpy` would write **9 bytes** — a one-byte overflow into the following
+field. Replaced with a fixed-size `memcpy` plus a `_Static_assert` so a future
+shortening of the literal fails the build instead of silently corrupting a
+volume.
+
+This is worth noting as a class: the old signature's fit was an accident of the
+string being exactly the field size, and it would have broken on the first
+plausible rename.
+
+### Banner rewrite method
+
+Done with a string-literal-aware transformer rather than `sed`, because
+`SPADFSCK` also appears as an include-guard identifier (`_SPADFS_SPADFSCK_SCK_H`)
+which must not be touched. It emits C concatenation (`"RUN " TOOL_BANNER " AGAIN"`),
+so the banner comes from one build-time definition per tool.
+
+### Note on the `struct.h` linter noise
+
+Every edit to `struct.h` draws ~20 `__u8`/`__u32`/`__finline__`/`SPAD2CPU32_LV`
+"unknown type" errors. These are the AGENTS.md Rule 1 phantom class, and three
+things were checked rather than assumed:
+
+1. **Pre-existing, not caused by this work** — pristine `main`'s `struct.h` has
+   75 occurrences of those symbols and zero `#include` lines: identical structure.
+2. **The suggested fix does not break userspace** — include guards stop the
+   recursion and it compiles. (An earlier claim here said it would; that was wrong.)
+3. **The suggested fix does break the kernel** — verified in a throwaway copy:
+   `utils/common.h:22: fatal error: sys/types.h: No such file or directory`,
+   because `common.h` pulls libc headers into a kernel translation unit.
+
+So the only change the checker would accept is one that breaks the module build.
+Not applied. `struct.h` is left as the author wrote it, and GCC via kbuild is
+clean.
+
+---
+
 ## Open decisions
 
 1. **Kernel floor for spadfs2.** `linux-compat.h` is ~350 lines of

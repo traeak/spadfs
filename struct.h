@@ -1,6 +1,15 @@
 #ifndef _SPADFS_COMMON_STRUCT_H
 #define _SPADFS_COMMON_STRUCT_H
 
+/*
+ * This header uses __u8/__u32/__u64/__s32 throughout but previously relied on
+ * whoever included it to have pulled in the definitions first. Including
+ * <linux/types.h> directly makes it self-contained: it is idempotent under
+ * kbuild (already reachable via linux/init.h et al) and supplies the fixed-width
+ * types for the userspace tools, which share this header.
+ */
+#include <linux/types.h>
+
 /*	*******************
 	* DATA STRUCTURES *
 	*******************
@@ -65,11 +74,31 @@ struct userblock {
 
 #define SUPERBLOCK_SECTOR		16384
 
-#define SUPERBLOCK_SIGNATURE		"FS SPAD\000"
+/*
+ * The single decisive format break for spadfs2.
+ *
+ * signature is __u8[8] and is compared with memcmp(..., sizeof sb->signature),
+ * i.e. all 8 bytes, so "FS SPAD2" fills the field exactly. Note that the old
+ * value "FS SPAD\000" was also exactly 8 bytes *including* its terminator --
+ * which is why the strcpy() in mkspadfs appeared to work. An 8-character
+ * string plus a NUL is 9 bytes, so that strcpy would now overflow the field.
+ * It was replaced with a fixed-size memcpy.
+ *
+ * An old spadfs.ko cannot mount a spadfs2 volume: the signature check at
+ * super.c:1197 rejects it. That is the point -- it removes every
+ * "don't misread the other format" code path.
+ */
+#define SUPERBLOCK_SIGNATURE		"FS SPAD2"
 
+/*
+ * spadfs2's own version numbering. Deliberately not inherited from v1.0.22:
+ * this is a new filesystem type, not a later release of the old one.
+ * version_major must match exactly (super.c:1210); middle/minor are don't-care
+ * for the gate but are reset here for the same reason.
+ */
 #define SPADFS_VERSION_MAJOR		1
-#define SPADFS_VERSION_MIDDLE		1
-#define SPADFS_VERSION_MINOR		22
+#define SPADFS_VERSION_MIDDLE		0
+#define SPADFS_VERSION_MINOR		0
 
 #define CCT_SIZE			(65536*4)	/* do not change it */
 #define SSIZE_BITS			9		/* --- "" --- */

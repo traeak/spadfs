@@ -50,7 +50,7 @@ def read_super(path):
         raise ValueError("short read of superblock")
 
     sig = sb[0:8]
-    if sig != b"FS SPAD\x00":
+    if sig != b"FS SPAD2":
         raise ValueError(f"bad superblock signature: {sig!r}")
 
     (byte_sex,) = struct.unpack_from("<Q", sb, 8)

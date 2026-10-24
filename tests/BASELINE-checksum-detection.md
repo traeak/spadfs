@@ -9,7 +9,7 @@ target whose contents the class can actually change.
 | Target | Class | checksums | no-checksums | Result |
 |---|---|---|---|---|
 | superblock | bitflip | ERROR | ERROR | harness error |
-| superblock | byte_transpose | NOOP | NOOP | n/a (no live bytes to change) |
+| superblock | byte_transpose | DETECTED | DETECTED | detected |
 | superblock | word_swap | DETECTED | DETECTED | detected |
 | superblock | word_dup | DETECTED | DETECTED | detected |
 | superblock | block_copy | DETECTED | DETECTED | detected |
@@ -61,6 +61,6 @@ target whose contents the class can actually change.
 ## Summary
 
 - cases attempted: 49
-- detected: 29
+- detected: 30
 - **NOT detected: 7**
-- not applicable / harness error: 13
+- not applicable / harness error: 12

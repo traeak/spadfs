@@ -29,7 +29,7 @@ int init_log(void)
 	if (!logfile) return 0;
 	logh = open(logfile, O_WRONLY | O_CREAT | O_APPEND, 0600);
 	if (__unlikely(logh == -1)) return 1;
-	log_only_printf("\nSPADFSCK STARTED AT %"__64_format"d ON %s\n", (__u64)time(NULL), dev);
+	log_only_printf("\n" TOOL_BANNER " STARTED AT %"__64_format"d ON %s\n", (__u64)time(NULL), dev);
 	if (was_log_error) {
 		close(logh);
 		logh = -1;
@@ -171,7 +171,7 @@ int query(char *file, long line, int flags, char *msg, ...)
 	else _eprintf("\e[0m (YES/NO) ");
 	clr_status();
 	if (y && flags & Q_IMPORTANT) {
-		log_printf(0, " NO (RUN SPADFSCK AGAIN WITHOUT /Y)");
+		log_printf(0, " NO (RUN " TOOL_BANNER " AGAIN WITHOUT /Y)");
 		goto ret_0;
 	}
 	reply[0] = 0;
@@ -238,7 +238,7 @@ int done_log(void)
 		mem_free(m);
 	}
 	if (logh != -1) {
-		log_only_printf("SPADFSCK ENDED AT %"__64_format"d ON %s\n\n", (__u64)time(NULL), dev);
+		log_only_printf(TOOL_BANNER " ENDED AT %"__64_format"d ON %s\n\n", (__u64)time(NULL), dev);
 	}
 	if (__unlikely(was_log_error)) {
 		log_printf(1, "THERE WAS ERROR WRITING TO LOG %s: %s", logfile, strerror(was_log_error));

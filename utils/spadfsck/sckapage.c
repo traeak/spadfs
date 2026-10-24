@@ -46,7 +46,7 @@ int check_apages(void)
 
 	if ((unsigned long)apage_index_sectors << SSIZE_BITS >> SSIZE_BITS != apage_index_sectors ||
 	    (unsigned long)n_apages * sizeof(blk_t) / sizeof(blk_t) != n_apages) {
-		log_printf(1, "TOO BIG APAGE INDEX, YOU NEED 64-BIT SPADFSCK");
+		log_printf(1, "TOO BIG APAGE INDEX, YOU NEED 64-BIT " TOOL_BANNER "");
 		return 2;
 	}
 

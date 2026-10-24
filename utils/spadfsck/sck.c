@@ -154,7 +154,7 @@ int main(int argc, const char * const argv[])
 	const char * const *arg = argv;
 	int state = 0;
 	if (__unlikely(__parse_params(&arg, &state, params, vars, NULL, NULL, NULL)) || __unlikely(!dev)) {
-		_snprintf(ERROR_MSG(), __MAX_STR_LEN, "SPADFSCK: SYNTAX ERROR");
+		_snprintf(ERROR_MSG(), __MAX_STR_LEN, TOOL_BANNER ": SYNTAX ERROR");
 		r = -EBADSYN;
 		goto ret_r;
 	}
@@ -167,7 +167,7 @@ int main(int argc, const char * const argv[])
 	*/
 	if (0) {
 		badsyn:
-		_snprintf(ERROR_MSG(), __MAX_STR_LEN, "SPADFSCK: SYNTAX ERROR");
+		_snprintf(ERROR_MSG(), __MAX_STR_LEN, TOOL_BANNER ": SYNTAX ERROR");
 		r = -EBADSYN;
 		goto ret_r;
 	}
@@ -259,7 +259,7 @@ int main(int argc, const char * const argv[])
 #endif
 
 	if (!spadfs_struct_check_correctness()) {
-		_snprintf(ERROR_MSG(), __MAX_STR_LEN, "SPADFSCK: BAD STRUCTURE ALIGNMENT, THE PROGRAM WAS COMPILED WITH WRONG ABI");
+		_snprintf(ERROR_MSG(), __MAX_STR_LEN, TOOL_BANNER ": BAD STRUCTURE ALIGNMENT, THE PROGRAM WAS COMPILED WITH WRONG ABI");
 		r = -EINVAL;
 		goto ret_r;
 	}
@@ -267,9 +267,9 @@ int main(int argc, const char * const argv[])
 	if (undelete_scan_all) undelete = 1;
 	if (ro && (__unlikely(y | mark_fsck | extend | rebuild_apages | reset_cc | undelete) || __unlikely(reserve != -1))) {
 #ifdef __SPAD__
-		_snprintf(ERROR_MSG(), __MAX_STR_LEN, "SPADFSCK: YOU CAN'T USE BOTH /RO AND /Y, /MARK, /SET_RESERVE, /EXTEND, /REBUILD_APAGES, /RESET_CRASH_COUNTS, /UNDELETE");
+		_snprintf(ERROR_MSG(), __MAX_STR_LEN, TOOL_BANNER ": YOU CAN'T USE BOTH /RO AND /Y, /MARK, /SET_RESERVE, /EXTEND, /REBUILD_APAGES, /RESET_CRASH_COUNTS, /UNDELETE");
 #else
-		_snprintf(ERROR_MSG(), __MAX_STR_LEN, "SPADFSCK: YOU CAN'T USE BOTH -n AND -y, --mark, --set-reserve, --extend, --rebuild-apages, --reset-crash-counts, --undelete");
+		_snprintf(ERROR_MSG(), __MAX_STR_LEN, TOOL_BANNER ": YOU CAN'T USE BOTH -n AND -y, --mark, --set-reserve, --extend, --rebuild-apages, --reset-crash-counts, --undelete");
 #endif
 		r = -EBADSYN;
 		goto ret_r;
@@ -287,7 +287,7 @@ int main(int argc, const char * const argv[])
 		);
 	if (__unlikely(device_handle < 0)) {
 		r = -errno;
-		_snprintf(ERROR_MSG(), __MAX_STR_LEN, "SPADFSCK: CAN'T OPEN %s: %s", dev, strerror(-r));
+		_snprintf(ERROR_MSG(), __MAX_STR_LEN, TOOL_BANNER ": CAN'T OPEN %s: %s", dev, strerror(-r));
 		goto realret;
 	}
 #ifdef UNRELIABLE_O_DIRECT
@@ -300,12 +300,12 @@ int main(int argc, const char * const argv[])
 		st_valid = 1;
 	} else if (errno != EOVERFLOW) {
 		r = -errno;
-		_snprintf(ERROR_MSG(), __MAX_STR_LEN, "SPADFSCK: CAN'T FSTAT %s: %s", dev, strerror(-r));
+		_snprintf(ERROR_MSG(), __MAX_STR_LEN, TOOL_BANNER ": CAN'T FSTAT %s: %s", dev, strerror(-r));
 		goto realret;
 	}
 	if (__unlikely(init_log())) {
 		r = -errno;
-		_snprintf(ERROR_MSG(), __MAX_STR_LEN, "SPADFSCK: CAN'T OPEN LOG FILE %s: %s", logfile, strerror(-r));
+		_snprintf(ERROR_MSG(), __MAX_STR_LEN, TOOL_BANNER ": CAN'T OPEN LOG FILE %s: %s", logfile, strerror(-r));
 		goto realret;
 	}
 	if (is_mounted(dev, device_handle) >= 2) {

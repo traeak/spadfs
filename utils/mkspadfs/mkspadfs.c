@@ -456,7 +456,16 @@ static void write_super(void)
 {
 	const char *val;
 	zerobuf();
-	strcpy((char *)sb->signature, SUPERBLOCK_SIGNATURE);
+	/*
+	 * Was strcpy(), which only worked because the old signature "FS SPAD\000"
+	 * was exactly 8 bytes including its terminator. spadfs2's signature is 8
+	 * characters, so strcpy would write 9 bytes into __u8 signature[8].
+	 * Fixed-size memcpy instead, with a compile-time guard so a future
+	 * shortening of the literal fails the build rather than the volume.
+	 */
+	_Static_assert(sizeof SUPERBLOCK_SIGNATURE >= sizeof sb->signature,
+		       "SUPERBLOCK_SIGNATURE shorter than superblock.signature field");
+	memcpy(sb->signature, SUPERBLOCK_SIGNATURE, sizeof sb->signature);
 	CPU2SPAD64_LV(&sb->byte_sex, __make64(0x89ABCDEF, 0x01234567));
 	sb->version_major = SPADFS_VERSION_MAJOR;
 	sb->version_middle = SPADFS_VERSION_MIDDLE;
@@ -489,7 +498,7 @@ static void write_super(void)
 	sb->checksum = CHECKSUM_BASE ^ __byte_sum(sb, 512);
 	if ((val = validate_super(sb))) {
 		fprintf(stderr, "\rerror: %s\n", val);
-		error(4, 0, "\rinternal error, validate_super failed. Report all arguments that you passed to MKSPADFS");
+		error(4, 0, "\rinternal error, validate_super failed. Report all arguments that you passed to " TOOL_BANNER "");
 	}
 	write_blocks(sb, SUPERBLOCK_SECTOR, block_sectors);
 	if (!truncated) write_blocks(sb, size, block_sectors);
@@ -882,7 +891,7 @@ int main(int argc, const char * const argv[])
 	}
 
 	if (!spadfs_struct_check_correctness()) {
-		error(16, 0, "\rMKSPADFS: BAD STRUCTURE ALIGNMENT, THE PROGRAM WAS COMPILED WITH WRONG ABI");
+		error(16, 0, "\r" TOOL_BANNER ": BAD STRUCTURE ALIGNMENT, THE PROGRAM WAS COMPILED WITH WRONG ABI");
 	}
 
 	buffer = (char *)((unsigned long)(buffer_ + MAX_PAGE_SIZE - 1) & ~(unsigned long)(MAX_PAGE_SIZE - 1));

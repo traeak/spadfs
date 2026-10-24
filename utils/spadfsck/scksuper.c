@@ -130,7 +130,7 @@ static int test_sb_at_sector(blk_t sector)
 		}
 	}
 	if (__unlikely(super.version_major != SPADFS_VERSION_MAJOR)) {
-		log_printf(0, "BAD %s VERSION NUMBER (DISK: %d.%d.%d, SPADFSCK: %d.%d.%d)", super.version_major != SPADFS_VERSION_MAJOR ? "MAJOR" : "MIDDLE", super.version_major, super.version_middle, super.version_minor, SPADFS_VERSION_MAJOR, SPADFS_VERSION_MIDDLE, SPADFS_VERSION_MINOR);
+		log_printf(0, "BAD %s VERSION NUMBER (DISK: %d.%d.%d, " TOOL_BANNER ": %d.%d.%d)", super.version_major != SPADFS_VERSION_MAJOR ? "MAJOR" : "MIDDLE", super.version_major, super.version_middle, super.version_minor, SPADFS_VERSION_MAJOR, SPADFS_VERSION_MIDDLE, SPADFS_VERSION_MINOR);
 		return 2;
 	}
 	if (__unlikely(SPAD2CPU32_LV(&super.flags_compat_rw) & ~(0)) ||
@@ -262,7 +262,7 @@ static int check_sb2(void)
 			}
 #ifdef __linux__
 			if (ss - ds < getpagesize() / 512)
-				log_printf(1, "THIS ERROR CAN HAPPEN DUE TO BUG IN BUFFER CACHE IN OLDER LINUX KERNELS. DO NOT FIX IT AND TERMINATE SPADFSCK OR YOU MIGHT LOSE SOME DATA !!!");
+				log_printf(1, "THIS ERROR CAN HAPPEN DUE TO BUG IN BUFFER CACHE IN OLDER LINUX KERNELS. DO NOT FIX IT AND TERMINATE " TOOL_BANNER " OR YOU MIGHT LOSE SOME DATA !!!");
 #endif
 			if (query(qprefix Q_IMPORTANT, "TRUNCATE? (WARNING!!! THIS OPERATION WILL DESTROY DATA IN INACCESSIBLE AREA OF DEVICE)")) {
 				CPU2SPAD64_LV(&super.reserve_sectors, get_default_reserved(SPAD2CPU64_LV(&super.size)) & ~(blk_t)block_mask);

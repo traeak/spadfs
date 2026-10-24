@@ -19,6 +19,11 @@ built-in.a
 modules.builtin
 modules.order
 spadfs.mod
+# spadfs2 build products. Root-anchored for the binaries, same reason as above:
+# an unanchored pattern could match a source path on a future rename.
+/mkspadfs2
+/spadfsck2
+spadfs2.mod
 # Leading slash: the built binary at repo root only, NOT the utils/spadfsck/ source dir.
 /spadfsck
 __pycache__/

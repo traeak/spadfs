@@ -9,8 +9,13 @@ set -u
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 
-MK="$REPO_ROOT/mkspadfs"
-FSCK="$REPO_ROOT/spadfsck"
+# Tool paths are env-overridable so the same suite can drive either stack:
+#   - spadfs2 (this branch's default binaries)
+#   - the v1.0.22 reference binaries, for the Phase 0.4 side-by-side rig
+# Override with e.g.  MKSPADFS=/path/to/mkspadfs SPADFSCK=/path/to/spadfsck
+SUFFIX="${SPADFS_TOOL_SUFFIX:-2}"
+MK="${MKSPADFS:-$REPO_ROOT/mkspadfs$SUFFIX}"
+FSCK="${SPADFSCK:-$REPO_ROOT/spadfsck$SUFFIX}"
 
 PASS=0
 FAIL=0
