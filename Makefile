@@ -48,12 +48,14 @@ utils/mkspadfs/%.o : utils/mkspadfs/%.c
 	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) -c -o $@ -x c $<
 
 $(MKFS_TOOL) : \
+	utils/crc32c.o \
 	utils/mounted.o \
 	utils/mkspadfs/mkspadfs.o
 	$(SPADFS_CC) $(SPADFS_CFLAGS) -o $@ $^
 
 $(FSCK_TOOL) : \
 	utils/common.o \
+	utils/crc32c.o \
 	utils/mounted.o \
 	utils/spadfsck/sck.o \
 	utils/spadfsck/sckalloc.o \
@@ -89,11 +91,20 @@ clean : clean-kernel clean-userspace
 
 # Unprivileged test suite: no root, no loop devices, no module loading.
 # Depends only on the userspace tools, so CI can run it without kernel headers.
-test : $(MKFS_TOOL) $(FSCK_TOOL)
+test : $(MKFS_TOOL) $(FSCK_TOOL) crc-agreement
 	bash tests/roundtrip.sh
 	bash tests/detect.sh > tests/BASELINE-checksum-detection.md
 	bash tests/cct_integrity.sh > tests/BASELINE-cct-integrity.md
 	@echo "regenerated both BASELINE files in tests/"
+
+# Runs first among the Phase 2 checks on purpose: if the kernel and userspace
+# CRC implementations disagree, every other result below is meaningless, so
+# there is no point computing it.
+crc-agreement : utils/crc32c.o
+	$(CC) -Wall -Wextra -Wno-unused-parameter -I. -o tests/crc_agreement \
+		tests/crc_agreement.c utils/crc32c.c
+	@./tests/crc_agreement | tail -3
+	@echo "crc agreement gate passed"
 
 # NOTE: `test-ref` (side-by-side spadfs/spadfs2 reference comparison, plan task
 # 0.4) is not defined yet -- it needs root for insmod/mount and is deliberately

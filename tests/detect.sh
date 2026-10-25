@@ -38,7 +38,11 @@ base_for() {
 		# Prime the crash-count table. On a fresh volume it is all zeros, so
 		# every cct class is a no-op and the target tests nothing. Priming gives
 		# it plausible post-mount contents (see tests/prime.py).
-		python3 "$TESTS_DIR/prime.py" "$img" --cc 4 --base-txc 1388 \
+		#
+		# prime.py reports what it did on stdout, and base_for returns the path
+		# the same way -- so that output MUST go to stderr or it gets glued onto
+		# the filename. It did, and silently corrupted the whole baseline.
+		python3 "$TESTS_DIR/prime.py" "$img" --cc 4 --base-txc 1388 >&2 \
 			|| die "priming base $mode failed"
 		# Priming must not itself break the volume.
 		check_clean "$img" -n || die "primed base $mode is not clean"
@@ -49,8 +53,10 @@ base_for() {
 # -> DETECTED | MISSED | NOOP | ERROR
 run_case() {
 	local mode="$1" target="$2" cls="$3"
-	local img="$WORKDIR/case.img" rc=0
-	cp -f "$(base_for "$mode")" "$img"
+	local img="$WORKDIR/case-$mode.img" rc=0
+	cp -f "$(base_for "$mode")" "$img" 2>/dev/null
+	# Fail loudly rather than measure a missing or stale image.
+	[ -f "$img" ] || { printf 'ERROR'; return 0; }
 
 	python3 "$TESTS_DIR/corrupt.py" "$img" "$target" "$cls" >/dev/null 2>&1 || rc=$?
 	if [ "$rc" -eq 3 ]; then

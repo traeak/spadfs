@@ -39,6 +39,10 @@
 
 #include "linux-compat.h"
 
+/* Phase 2 metadata trailer helpers. Included here so every kernel translation
+ * unit sees the same spadfs_meta_seal/verify the userspace tools implement. */
+#include "meta_crc.h"
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23) || TEST_RHEL_VERSION(5,3)
 #include <linux/falloc.h>
 #endif
