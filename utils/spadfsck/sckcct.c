@@ -105,6 +105,17 @@ int check_cct(void)
  * would turn an ordinary crash between the cct write and the CRC write into
  * an unmountable volume.
  */
+/*
+ * Task 3.1/3.2 state. Set by the two check functions, consumed by
+ * repair_cct_backup(). Kept as file-scope flags rather than return codes
+ * because the checks run at different points in the pass and the repair has
+ * to see both outcomes at once.
+ */
+static int cct_primary_bad_flag = 1;	/* unknown until check_cct_crc() runs */
+static int cct_backup_present;	/* region exists and is block-aligned */
+static int cct_backup_bad = 1;	/* present but failed verification */
+static int cct_backup_usable;	/* present and fully verified good */
+
 int check_cct_crc(void)
 {
 	static __u32 stored[CCT_SECTORS];
@@ -164,6 +175,7 @@ int check_cct_crc(void)
 	if (__unlikely(bad_units)) {
 		log_printf(0, "CCT CRC TABLE UNTRUSTWORTHY (%d BAD UNIT(S)); CANNOT VERIFY CCT",
 			   bad_units);
+		cct_primary_bad_flag = 1;
 		return 1;
 	}
 
@@ -186,9 +198,11 @@ int check_cct_crc(void)
 
 	if (__unlikely(bad_sectors)) {
 		log_printf(0, "CRASH COUNT TABLE CORRUPT: %d SECTOR(S) FAIL CHECKSUM", bad_sectors);
+		cct_primary_bad_flag = 1;
 		return 1;
 	}
 
+	cct_primary_bad_flag = 0;
 	return 0;
 }
 
@@ -211,18 +225,66 @@ int check_cct_crc(void)
  * A volume whose superblock carries no cct_backup pointer is simply one
  * formatted without the feature; that is not an error, so return clean.
  */
+/*
+ * Copy n_sectors from src to dst, one sector at a time through a private
+ * buffer. The bounce through copybuf is not paranoia: read_buffer hands back a
+ * pointer into a shared pool that write_buffer can recycle underneath it, so
+ * copying straight from the read pointer to the write would be a use-after-
+ * invalidate waiting to happen.
+ */
+static int copy_sectors(__u64 dst, __u64 src, unsigned n_sectors, const char *what)
+{
+	static unsigned char copybuf[512];
+	unsigned i;
+
+	for (i = 0; i < n_sectors; i++) {
+		unsigned char *b = read_buffer(src + i, 1, 0);
+
+		if (__unlikely(!b)) {
+			log_printf(0, "CANT READ %s SECTOR %u: %s", what, i, buffer_error);
+			return 1;
+		}
+		memcpy(copybuf, b, 512);
+		if (__unlikely(write_buffer(dst + i, 1, copybuf))) {
+			log_printf(0, "CANT WRITE %s SECTOR %u: %s", what, i, buffer_error);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Phase 3.1 + 3.2: the crash-count table backup mirror.
+ *
+ * Full two-layer verification, mirroring check_cct_crc():
+ *
+ *   layer 1  the mirror's CRC units must themselves carry a valid seal
+ *   layer 2  every mirror sector must match its stored CRC
+ *
+ * Layer 1 alone is not enough -- a unit can be perfectly sealed around a set
+ * of CRCs that no longer describe the data. Both layers have to pass before
+ * the mirror is eligible to restore from.
+ *
+ * A volume whose superblock carries no cct_backup pointer is simply one
+ * formatted without the feature; that is not an error.
+ */
 int check_cct_backup(void)
 {
+	static __u32 stored[CCT_BACKUP_SECTORS];
 	blk_t block_sectors = (blk_t)1 << super.sectors_per_block_bits;
 	blk_t crc_span = ((blk_t)CCT_BACKUP_CRC_UNITS + block_sectors - 1)
 			 / block_sectors * block_sectors;
 	__u64 backup = SPAD2CPU64_LV(&super.cct_backup);
 	__u64 backup_crc = SPAD2CPU64_LV(&super.cct_backup_crc);
-	unsigned u;
+	unsigned u, i;
 	int r;
-	int bad_units = 0;
+	int bad_units = 0, bad_sectors = 0;
 
 	status_printf(0, "checking crash count table backup...");
+
+	cct_backup_present = 0;
+	cct_backup_bad = 1;
+	cct_backup_usable = 0;
 
 	if (!backup || !backup_crc) {
 		log_printf(0, "NO CCT BACKUP REGION IN SUPERBLOCK");
@@ -241,6 +303,7 @@ int check_cct_backup(void)
 			   backup, backup_crc);
 		return 1;
 	}
+	cct_backup_present = 1;
 
 	if (__unlikely(r = alloc_blocks(backup, CCT_BACKUP_SECTORS))) {
 		if (r == 1) log_printf(0, "CCT BACKUP REGION ALLOCATION ERROR: %s", alloc_error);
@@ -251,12 +314,6 @@ int check_cct_backup(void)
 		return 0;
 	}
 
-	/*
-	 * Verify the mirror's CRC units carry a valid seal. We deliberately do
-	 * not compare the mirror against the primary here -- that is Task 3.2's
-	 * restore decision, and it has to reason about how far the two have
-	 * diverged, which is a different question from "is this region sound".
-	 */
 	for (u = 0; u < CCT_BACKUP_CRC_UNITS; u++) {
 		unsigned char *unit = read_buffer(backup_crc + u, 1, BUFFER_FREE_SOON);
 
@@ -271,12 +328,179 @@ int check_cct_backup(void)
 			} else {
 				bad_units++;
 			}
+			continue;
+		}
+		for (i = 0; i < CCT_CRC_PER_UNIT; i++) {
+			unsigned sector = u * CCT_CRC_PER_UNIT + i;
+
+			if (sector >= CCT_BACKUP_SECTORS)
+				break;
+			stored[sector] = spadfs_meta_get_crc(unit + i * 4);
 		}
 	}
 
 	if (__unlikely(bad_units)) {
-		log_printf(0, "CCT BACKUP CRC TABLE UNTRUSTWORTHY (%d BAD UNIT(S))", bad_units);
+		log_printf(0, "CCT BACKUP CRC TABLE UNTRUSTWORTHY (%d BAD UNIT(S)); CANNOT VERIFY BACKUP",
+			   bad_units);
 		return 1;
+	}
+
+	for (i = 0; i < CCT_BACKUP_SECTORS; i++) {
+		unsigned char *sec = read_buffer(backup + i, 1, BUFFER_FREE_SOON);
+
+		if (__unlikely(!sec)) {
+			log_printf(0, "CANT READ CCT BACKUP SECTOR %u: %s", i, buffer_error);
+			return 0;
+		}
+		if (__unlikely(spadfs_crc32c_std(sec, 512) != stored[i])) {
+			if (bad_sectors < MAX_SAME_ERRORS) {
+				log_printf(0, "CCT BACKUP SECTOR %u DOES NOT MATCH ITS CHECKSUM", i);
+				if (++bad_sectors == MAX_SAME_ERRORS) log_suppress();
+			} else {
+				bad_sectors++;
+			}
+		}
+	}
+
+	if (__unlikely(bad_sectors)) {
+		log_printf(0, "CCT BACKUP CORRUPT: %d SECTOR(S) FAIL CHECKSUM", bad_sectors);
+		return 1;
+	}
+
+	cct_backup_bad = 0;
+	cct_backup_usable = 1;
+	return 0;
+}
+
+/*
+ * Task 3.2: the recovery decision matrix.
+ *
+ * primary | backup    | action
+ * --------+-----------+---------------------------------------------------
+ * good    | good      | nothing
+ * good    | bad       | recreate the mirror from the primary
+ * good    | absent    | create the mirror
+ * bad     | good      | restore the primary from the mirror
+ * bad     | bad       | no non-destructive recovery; fall back to reset
+ * bad     | absent    | same -- reset
+ *
+ * THE RESTORE IS Q_IMPORTANT AND MUST NOT BE AUTO-ANSWERED.
+ *
+ * Reason, and it is not caution for its own sake: until Task 3.3 teaches the
+ * kernel commit path to keep the mirror current, the mirror is only as fresh
+ * as the last time mkspadfs wrote it. Restoring it on a volume that has been
+ * mounted since would roll the crash-count epoch back to zero.
+ *
+ * That is not a benign stale-copy problem, it is silent data reversion.
+ * CC_VALID(cc, txc) is (s32)(cct[cc] - txc) >= 0, so a cct reset to zero
+ * makes every structure with txc > 0 read as INVALID, which promotes the
+ * older alternate version: files created since vanish, deleted files return,
+ * renames unwind. The volume mounts and lies.
+ *
+ * So this function makes the restore available and correct in mechanism, but
+ * gated on a human who can see the staleness warning. Task 3.3 must add an
+ * epoch stamp to the mirror so fsck can prove freshness instead of guessing;
+ * until then auto-restore is unsafe by construction.
+ */
+int repair_cct_backup(void)
+{
+	int r;
+
+	/* both fine -- nothing to do */
+	if (__likely(!cct_primary_bad_flag && cct_backup_usable))
+		return 0;
+
+	if (__unlikely(cct_primary_bad_flag && cct_backup_bad)) {
+		log_printf(0, "BOTH THE CRASH COUNT TABLE AND ITS BACKUP ARE DAMAGED");
+		log_printf(0, "NO NON-DESTRUCTIVE RECOVERY IS AVAILABLE");
+		log_printf(0, "FALLING BACK TO A FULL TABLE RESET, WHICH DISCARDS THE");
+		log_printf(0, "CRASH-COUNT EPOCH MAPPING FOR EVERY MOUNT SINCE THE BACKUP");
+		return 0;
+	}
+
+	if (cct_primary_bad_flag && cct_backup_usable) {
+		log_printf(0, "CRASH COUNT TABLE IS DAMAGED BUT ITS BACKUP VERIFIES");
+		if (!query(qprefix Q_IMPORTANT,
+			   "RESTORE CRASH COUNT TABLE FROM BACKUP?"))
+			return 0;
+		/*
+		 * Copy the mirror's data AND its CRC region, so the primary ends
+		 * up exactly equal to something that was just verified as a
+		 * whole. Recomputing only one half would leave the two halves
+		 * describing different bytes.
+		 */
+		if (copy_sectors(SPAD2CPU64_LV(&super.cct), SPAD2CPU64_LV(&super.cct_backup),
+			       CCT_BACKUP_SECTORS, "CCT BACKUP->PRIMARY DATA"))
+			return 0;
+		if (copy_sectors(SPAD2CPU64_LV(&super.cct_crc), SPAD2CPU64_LV(&super.cct_backup_crc),
+			       CCT_BACKUP_CRC_UNITS, "CCT BACKUP->PRIMARY CRC"))
+			return 0;
+
+		/*
+		 * Reload the in-memory table. check_cct() filled cct[] from the
+		 * damaged primary, and everything downstream -- cc_check(),
+		 * fix_txblock(), the directory walk -- reads it. Leaving it stale
+		 * after a successful on-disk restore would be the worst kind of
+		 * half-fix.
+		 *
+		 * cct[] holds the raw disk-endian words exactly as check_cct()
+		 * stored them, so a straight sector-wise memcpy reproduces that.
+		 */
+		{
+			unsigned i;
+
+			for (i = 0; i < CCT_BACKUP_SECTORS; i++) {
+				unsigned char *b = read_buffer(SPAD2CPU64_LV(&super.cct) + i, 1, 0);
+
+				if (__unlikely(!b)) {
+					log_printf(0, "CANT RELOAD RESTORED CCT SECTOR %u: %s",
+						   i, buffer_error);
+					return 0;
+				}
+				memcpy((char *)cct + (unsigned long)i * 512, b, 512);
+			}
+		}
+		cct_valid = 1;
+		cct_primary_bad_flag = 0;
+		log_printf(0, "CRASH COUNT TABLE RESTORED FROM BACKUP");
+		return 0;
+	}
+
+	if (!cct_primary_bad_flag && cct_backup_present && cct_backup_bad) {
+		if (query(qprefix Q_NOFIX, "RECREATE CCT BACKUP FROM THE INTACT PRIMARY?")) {
+			if (copy_sectors(SPAD2CPU64_LV(&super.cct_backup), SPAD2CPU64_LV(&super.cct),
+				       CCT_BACKUP_SECTORS, "CCT PRIMARY->BACKUP DATA"))
+				return 0;
+			if (copy_sectors(SPAD2CPU64_LV(&super.cct_backup_crc), SPAD2CPU64_LV(&super.cct_crc),
+				       CCT_BACKUP_CRC_UNITS, "CCT PRIMARY->BACKUP CRC"))
+				return 0;
+			log_printf(0, "CCT BACKUP RECREATED");
+		}
+		return 0;
+	}
+
+	if (!cct_primary_bad_flag && !cct_backup_present) {
+		if (query(qprefix Q_NOFIX, "CREATE CCT BACKUP?")) {
+			blk_t block_sectors = (blk_t)1 << super.sectors_per_block_bits;
+			blk_t crc_span = ((blk_t)CCT_BACKUP_CRC_UNITS + block_sectors - 1)
+					 / block_sectors * block_sectors;
+			__u64 b, bc;
+
+			if (__unlikely(r = alloc_space(1, "CCT BACKUP", CCT_BACKUP_SECTORS, 0, 1, &b)))
+				return r;
+			if (__unlikely(r = alloc_space(1, "CCT BACKUP CRC", crc_span, 0, 1, &bc)))
+				return r;
+			CPU2SPAD64_LV(&super.cct_backup, b);
+			CPU2SPAD64_LV(&super.cct_backup_crc, bc);
+			write_super();
+			if (copy_sectors(b, SPAD2CPU64_LV(&super.cct), CCT_BACKUP_SECTORS,
+				       "CCT PRIMARY->NEW BACKUP DATA"))
+				return 0;
+			if (copy_sectors(bc, SPAD2CPU64_LV(&super.cct_crc), CCT_BACKUP_CRC_UNITS,
+				       "CCT PRIMARY->NEW BACKUP CRC"))
+				return 0;
+			log_printf(0, "CCT BACKUP CREATED AT %"blk_format"X", b);
+		}
 	}
 
 	return 0;
@@ -383,3 +607,9 @@ int cc_check(__u16 *cc, __s32 *txc, char *str1, const char *(*get_filename)(void
 	return 0;
 }
 
+
+/* Phase 3.2: verdict of check_cct_crc(), exposed for sck.c's control flow. */
+int cct_primary_bad(void)
+{
+	return cct_primary_bad_flag;
+}

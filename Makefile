@@ -95,6 +95,7 @@ test : $(MKFS_TOOL) $(FSCK_TOOL) crc-agreement
 	bash tests/roundtrip.sh
 	bash tests/detect.sh > tests/BASELINE-checksum-detection.md
 	bash tests/cct_integrity.sh > tests/BASELINE-cct-integrity.md
+	bash tests/cct_recovery.sh
 	@echo "regenerated both BASELINE files in tests/"
 
 # Runs first among the Phase 2 checks on purpose: if the kernel and userspace

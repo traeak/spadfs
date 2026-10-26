@@ -282,6 +282,8 @@ extern __s32 cct[65536];
 int check_cct(void);
 int check_cct_crc(void);
 int check_cct_backup(void);
+int repair_cct_backup(void);
+int cct_primary_bad(void);
 int recover_cct_allocs(void);
 int fix_cct(void);
 int cc_valid(__u16 cc, __s32 txc);

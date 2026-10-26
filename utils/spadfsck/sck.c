@@ -333,10 +333,28 @@ int main(int argc, const char * const argv[])
 		goto ret0;
 	}
 	if (__unlikely(r = check_cct())) goto ret;
-	/* cct side CRC verification (Phase 2.3, A5) -- see check_cct_crc */
-	if (__unlikely(r = check_cct_crc())) goto ret;
-	/* Phase 3.1: reserve + validate the cct backup mirror */
-	if (__unlikely(r = check_cct_backup())) goto ret;
+	/*
+	 * cct side CRC verification (Phase 2.3, A5) and the backup mirror check
+	 * (Phase 3.1/3.2) both record their verdict in file-scope state rather
+	 * than aborting the pass. They used to `goto ret` directly, which meant
+	 * the repair step below never ran -- a corrupt primary was detected and
+	 * then abandoned even though a good backup was sitting right there.
+	 */
+	(void) check_cct_crc();
+	(void) check_cct_backup();
+	/* Phase 3.2: restore or recreate the mirror using both results */
+	if (__unlikely(r = repair_cct_backup())) goto ret;
+	/*
+	 * Still bad after a repair attempt means nothing downstream can trust
+	 * the epoch mapping. Stop here, exactly as Phase 2.3 did when
+	 * check_cct_crc() returned 1.
+	 */
+	if (__unlikely(cct_primary_bad())) {
+		status_printf(0, "crash count table remains untrusted; skipping further checks");
+		goto ret;
+	}
+	/* Phase 3.2: restore/recreate the cct mirror using both check results */
+	if (__unlikely(r = repair_cct_backup())) goto ret;
 	if (__unlikely(r = check_apages())) goto ret;
 	if (__unlikely(r = check_dir_tree())) goto ret;
 	if (__unlikely(r = fix_cct())) goto ret;
