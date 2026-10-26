@@ -126,6 +126,14 @@ struct userblock {
 #define CCT_CRC_PER_UNIT	(SPADFS_META_COVER / 4)			/* 127 */
 #define CCT_CRC_UNITS		((CCT_SECTORS + CCT_CRC_PER_UNIT - 1) / CCT_CRC_PER_UNIT)	/* 5 */
 
+/*
+ * The backup mirror is a byte-for-byte copy of the cct, so it has the same
+ * sector count and the same side-CRC geometry. Aliasing the constants rather
+ * than restating them means the two can never drift apart.
+ */
+#define CCT_BACKUP_SECTORS	CCT_SECTORS
+#define CCT_BACKUP_CRC_UNITS	CCT_CRC_UNITS
+
 struct superblock {
 	__u8 signature[8];
 
@@ -159,6 +167,21 @@ struct superblock {
 	__u32 flags_compat_rw;
 	__u32 flags_compat_ro;
 	__u32 flags_compat_none;
+
+	/*
+	 * Phase 3: crash-count table backup.
+	 *
+	 * Appended after the existing fields rather than slotted next to cct_crc,
+	 * so that no offset already read by tests/sbinfo.py shifts. The grouping
+	 * is documented here instead of by adjacency.
+	 *
+	 * cct_backup is a full mirror of the crash-count table; cct_backup_crc
+	 * is its side CRC region, laid out exactly like cct_crc. Both are kept
+	 * current by the commit path (Task 3.3) so that a restore can never be
+	 * stale -- see the plan's note on silent data reversion.
+	 */
+	__u64 cct_backup;
+	__u64 cct_backup_crc;
 };
 
 #define FLAG_COMPAT_FSCK_NO_CHECKSUMS	0x00000001

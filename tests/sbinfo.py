@@ -34,9 +34,13 @@ FIELDS = [
     ("root",                      80, "Q"),
     ("cct_crc",                   88, "Q"),  # was pad2
     ("flags_compat_fsck",         96, "I"),
-    ("flags_compat_rw",          100, "I"),
-    ("flags_compat_ro",          104, "I"),
-    ("flags_compat_none",        108, "I"),
+    ("flags_compat_rw",         100, "I"),
+    ("flags_compat_ro",         104, "I"),
+    ("flags_compat_none",       108, "I"),
+    # Phase 3: cct backup mirror. Appended after the pre-existing fields, so
+    # every offset above is unchanged. Verified by offsetof probe, not by hand.
+    ("cct_backup",            112, "Q"),
+    ("cct_backup_crc",        120, "Q"),
 ]
 
 # struct superblock is little-endian on disk only if byte_sex reads ascending.

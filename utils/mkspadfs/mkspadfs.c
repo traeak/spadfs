@@ -72,7 +72,9 @@ error(int x, int y, char *m, ...)
 	4002+2*apage_index_sectors,n_apages*page_size (apages_sector) -- apages
 	apages_sector+n_apages*page_size,512 (cct_sector) -- txc table
 	cct_sector+CCT_SECTORS -- cct_crc_sector, CCT_CRC_UNITS of side CRCs
-	cct_crc_sector+CCT_CRC_UNITS -- root fnode
+	cct_crc_sector+cct_crc_sectors -- cct_backup_sector, CCT_SECTORS (Phase 3)
+	cct_backup_sector+CCT_SECTORS -- cct_backup_crc_sector, same CRC geometry
+	cct_backup_crc_sector+cct_crc_sectors -- root fnode
 	64 (ROOT_DIR) -- root directory
 	-- free space
 	superblock backup
@@ -161,6 +163,8 @@ static __u64 apages_sector;
 static __u64 cct_sector;
 static __u64 cct_crc_sector;
 static __u64 cct_crc_sectors;	/* CCT_CRC_UNITS rounded up to whole blocks */
+static __u64 cct_backup_sector;	/* Phase 3: mirror of the crash-count table */
+static __u64 cct_backup_crc_sector;
 static __u64 root_fnode_sector;
 static __u64 root_dir_sector;
 
@@ -351,7 +355,17 @@ static void check_valid(void)
 	 * for the allocator to trip over.
 	 */
 	cct_crc_sectors = ((CCT_CRC_UNITS + block_sectors - 1) / block_sectors) * block_sectors;
-	root_fnode_sector = cct_crc_sector + cct_crc_sectors;
+
+	/*
+	 * Phase 3: the cct mirror. Placed after the primary's CRC region and
+	 * before the root fnode, each boundary block-aligned for the same reason
+	 * the CRC region is: a short unaligned gap here becomes an unaligned
+	 * apage entry that fsck rejects. root_fnode then follows the mirror's
+	 * own CRC region, so the whole cct complex stays contiguous.
+	 */
+	cct_backup_sector = block_align(cct_crc_sector + cct_crc_sectors);
+	cct_backup_crc_sector = block_align(cct_backup_sector + CCT_BACKUP_SECTORS);
+	root_fnode_sector = cct_backup_crc_sector + cct_crc_sectors;
 	root_dir_sector = fnode_align(root_fnode_sector + block_sectors, ROOT_DIR_SECTORS);
 }
 
@@ -504,6 +518,8 @@ static void write_super(void)
 	CPU2SPAD64_LV(&sb->apage_index[1], apage_index_1_sector);
 	CPU2SPAD64_LV(&sb->cct, cct_sector);
 	CPU2SPAD64_LV(&sb->cct_crc, cct_crc_sector);
+	CPU2SPAD64_LV(&sb->cct_backup, cct_backup_sector);
+	CPU2SPAD64_LV(&sb->cct_backup_crc, cct_backup_crc_sector);
 	CPU2SPAD64_LV(&sb->root, root_fnode_sector);
 	if (unix_names)
 		CPU2SPAD32_LV(&sb->flags_compat_none, SPAD2CPU32_LV(&sb->flags_compat_none) | FLAG_COMPAT_NONE_UNIX_NAMES);
@@ -542,13 +558,13 @@ static void write_txbl(void)
 	write_blocks(sb, txblock_sector, block_sectors);
 }
 
-static void write_txct(void)
+static void write_txct(__u64 base)
 {
 	int i;
 	zerobuf();
 	for (i = 0; i < CCT_SECTORS; i += block_sectors) {
 		print_progress(CCT_SECTORS, i);
-		write_blocks(buffer, cct_sector + i, block_sectors);
+		write_blocks(buffer, base + i, block_sectors);
 	}
 }
 
@@ -569,7 +585,7 @@ static void write_txct(void)
  * sector. That is still recorded explicitly: what matters is that the stored
  * value matches what is on disk, not that it is interesting.
  */
-static void write_cct_crc(void)
+static void write_cct_crc(__u64 base)
 {
 	static __u8 zero_sector[512];
 	__u8 unit[512];
@@ -585,7 +601,7 @@ static void write_cct_crc(void)
 					    spadfs_crc32c_std(zero_sector, 512));
 		}
 		spadfs_meta_seal(unit);
-		write_blocks(unit, cct_crc_sector + u, 1);
+		write_blocks(unit, base + u, 1);
 	}
 }
 
@@ -985,8 +1001,16 @@ int main(int argc, const char * const argv[])
 	/*no need to write index 1 */
 	/*write_apage_index(apage_index_1_sector);*/
 	fprintf(stderr, "\rwriting crash count table...\n");
-	write_txct();
-	write_cct_crc();
+	write_txct(cct_sector);
+	write_cct_crc(cct_crc_sector);
+	/*
+	 * Phase 3: the mirror is written from the same zero-filled buffers as the
+	 * primary, so at mkfs the two are byte-identical and both are sealed.
+	 * A backup that is not CRC-valid from birth cannot be trusted later, and
+	 * an unsealed backup region would just move the unprotected link.
+	 */
+	write_txct(cct_backup_sector);
+	write_cct_crc(cct_backup_crc_sector);
 	fprintf(stderr, "\rwriting root fixed fnode...\n");
 	write_root_fixed_fnode();
 	fprintf(stderr, "\rwriting root directory...\n");

@@ -192,6 +192,96 @@ int check_cct_crc(void)
 	return 0;
 }
 
+/*
+ * Phase 3.1: the crash-count table backup mirror.
+ *
+ * Two jobs, both of which must be done before anything tries to use the
+ * mirror:
+ *
+ *  1. Reserve it. Same trap the primary CRC region taught us -- blocks that
+ *     are used in the allocation map but claimed by nothing get reported as
+ *       FILESYSTEM HAS 8 LOST SECTORS IN 1 RUNS
+ *     so both the mirror and its CRC region must be claimed explicitly.
+ *
+ *  2. Prove the mirror's own CRC units are sealed. A backup that cannot be
+ *     validated is not a backup, and discovering that at restore time is the
+ *     wrong moment. Full restore logic is Task 3.2; this establishes that the
+ *     region is present, aligned, and self-describing.
+ *
+ * A volume whose superblock carries no cct_backup pointer is simply one
+ * formatted without the feature; that is not an error, so return clean.
+ */
+int check_cct_backup(void)
+{
+	blk_t block_sectors = (blk_t)1 << super.sectors_per_block_bits;
+	blk_t crc_span = ((blk_t)CCT_BACKUP_CRC_UNITS + block_sectors - 1)
+			 / block_sectors * block_sectors;
+	__u64 backup = SPAD2CPU64_LV(&super.cct_backup);
+	__u64 backup_crc = SPAD2CPU64_LV(&super.cct_backup_crc);
+	unsigned u;
+	int r;
+	int bad_units = 0;
+
+	status_printf(0, "checking crash count table backup...");
+
+	if (!backup || !backup_crc) {
+		log_printf(0, "NO CCT BACKUP REGION IN SUPERBLOCK");
+		return 0;
+	}
+
+	/*
+	 * Block alignment is a hard requirement, not a preference. An unaligned
+	 * region boundary is what produced
+	 *   APAGE 0 (4080) HAS UNALIGNED ENTRY 0030 (42C5 - 42C8)
+	 * back in Phase 2. Catch it here rather than let the allocator trip on it.
+	 */
+	if (__unlikely(backup & (block_sectors - 1) ||
+		     backup_crc & (block_sectors - 1))) {
+		log_printf(0, "CCT BACKUP REGION IS NOT BLOCK ALIGNED (%"blk_format"X, %"blk_format"X)",
+			   backup, backup_crc);
+		return 1;
+	}
+
+	if (__unlikely(r = alloc_blocks(backup, CCT_BACKUP_SECTORS))) {
+		if (r == 1) log_printf(0, "CCT BACKUP REGION ALLOCATION ERROR: %s", alloc_error);
+		return 0;
+	}
+	if (__unlikely(r = alloc_blocks(backup_crc, crc_span))) {
+		if (r == 1) log_printf(0, "CCT BACKUP CRC REGION ALLOCATION ERROR: %s", alloc_error);
+		return 0;
+	}
+
+	/*
+	 * Verify the mirror's CRC units carry a valid seal. We deliberately do
+	 * not compare the mirror against the primary here -- that is Task 3.2's
+	 * restore decision, and it has to reason about how far the two have
+	 * diverged, which is a different question from "is this region sound".
+	 */
+	for (u = 0; u < CCT_BACKUP_CRC_UNITS; u++) {
+		unsigned char *unit = read_buffer(backup_crc + u, 1, BUFFER_FREE_SOON);
+
+		if (__unlikely(!unit)) {
+			log_printf(0, "CANT READ CCT BACKUP CRC UNIT %u: %s", u, buffer_error);
+			return 0;
+		}
+		if (__unlikely(spadfs_meta_verify(unit))) {
+			if (bad_units < MAX_SAME_ERRORS) {
+				log_printf(0, "CCT BACKUP CRC UNIT %u CHECKSUM MISMATCH", u);
+				if (++bad_units == MAX_SAME_ERRORS) log_suppress();
+			} else {
+				bad_units++;
+			}
+		}
+	}
+
+	if (__unlikely(bad_units)) {
+		log_printf(0, "CCT BACKUP CRC TABLE UNTRUSTWORTHY (%d BAD UNIT(S))", bad_units);
+		return 1;
+	}
+
+	return 0;
+}
+
 int recover_cct_allocs(void)
 {
 	if (cct_valid) {
