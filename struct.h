@@ -1130,6 +1130,34 @@ _Static_assert(SIZEOF_FNODE_BLOCK + FNODE_MAX_SIZE == FNODE_BLOCK_SIZE,
 		"the free fnode must tile the chain to the block boundary");
 _Static_assert(sizeof(struct txblock) <= 512,
 		"txblock larger than one metadata unit");
+/*
+ * The apage head/entry equality. The comment at struct apage_head says
+ * "must: sizeof(apage_head) == sizeof(aentry)" but nothing in the tree
+ * enforced it -- the head is reinterpreted as the first element of an
+ * aentry array that IS the allocation map, so a mismatch corrupts every
+ * apage rather than one field.
+ *
+ * This came up because widening apage_subhead.checksum from __u8 to __u32
+ * to hold a real CRC takes the head from 16 to 24 bytes. Measured, not
+ * guessed. That rules out in-place CRC for apages; see the Cat 3 notes.
+ */
+_Static_assert(sizeof(struct apage_head) == sizeof(struct aentry),
+		"apage_head must equal aentry in size -- it is the first array element");
+_Static_assert(sizeof(struct apage_subhead) <= sizeof(struct aentry),
+		"apage_subhead must fit within one aentry slot");
+_Static_assert(DNODE_PAGE_ENTRY_SIZE == 6,
+		"dnode page entry size drifted from its packed 6 bytes");
+/*
+ * The dnode page header holds TWO checksums, one per half of the page,
+ * selected by CC_VALID(cc, txc). Pinning the offset keeps the dual-version
+ * indexing honest -- checksum[0]/[1] must remain the last two bytes of the
+ * header so the half-page ranges start where the code assumes.
+ */
+_Static_assert(sizeof(struct dnode_page) == 24,
+		"dnode_page header size changed -- check the checksum[2] range math");
+_Static_assert(offsetof(struct dnode_page, checksum) == 22,
+		"dnode checksum[2] must sit at the end of the header");
+
 _Static_assert(sizeof(struct superblock) <= 512,
 		"superblock larger than one metadata unit");
 
