@@ -447,7 +447,8 @@ static int map_file(RECOVERY *rec, struct fnode *fnode, LIST_HEAD *zeroed)
 #define write_anode							\
 	do {								\
 		a->flags |= ANODE_CHECKSUM_VALID;			\
-		a->checksum ^= __byte_sum(a, ANODE_SIZE) ^ CHECKSUM_BASE;\
+		a->checksum = 0;						\
+		spadfs_meta_seal(a);\
 		write_buffer(ano, 1, a);				\
 	} while (0)
 	c = 0;

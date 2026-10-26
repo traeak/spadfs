@@ -134,11 +134,13 @@ struct anode *spadfs_read_anode(SPADFS *fs, sector_t secno,
 	}
 	if (unlikely(check_checksums(fs)) &&
 	    likely(anode->flags & ANODE_CHECKSUM_VALID)) {
-		if (unlikely(__byte_sum(anode, 512) != CHECKSUM_BASE)) {
+		if (unlikely(spadfs_meta_verify(anode))) {
 			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-				"bad checksum on anode %Lx at %s",
+				"bad checksum on anode %Lx at %s: stored %08x computed %08x",
 				(unsigned long long)secno,
-				msg);
+				msg,
+				spadfs_meta_stored_crc(anode),
+				spadfs_meta_computed_crc(anode));
 			goto rel_err;
 		}
 	}

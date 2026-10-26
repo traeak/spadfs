@@ -90,7 +90,12 @@ sector_t spadfs_size_2_sectors(SPADFS *fs, loff_t size)
 static void really_do_anode_checksum(struct anode *anode)
 {
 	anode->flags |= ANODE_CHECKSUM_VALID;
-	anode->checksum ^= CHECKSUM_BASE ^ __byte_sum(anode, ANODE_SIZE);
+	/* CRC trailer replaces the XOR fold (Phase 2.2 Cat 2). ANODE_N_EXTENTS
+	 * dropped 31 -> 30 and the struct gained an explicit trailer_crc field
+	 * at offset 508 -- explicit because the __u64 members force 8-byte
+	 * alignment, so the struct cannot end at 508 positionally. */
+	anode->checksum = 0;
+	spadfs_meta_seal(anode);
 }
 
 static void do_anode_checksum(SPADFS *fs, struct anode *anode)

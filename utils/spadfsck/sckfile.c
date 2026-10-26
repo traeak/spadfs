@@ -40,14 +40,14 @@ static struct anode *map_anode(blk_t ano, blk_t min, blk_t max, int *was_error, 
 #define update_anode							\
 do {									\
 	anode->flags |= ANODE_CHECKSUM_VALID;				\
-	anode->checksum ^= __byte_sum(anode, ANODE_SIZE) ^ CHECKSUM_BASE;\
+	anode->checksum = 0; spadfs_meta_seal(anode);\
 	write_buffer(ano, 1, anode);					\
 	if (__unlikely(!(anode = read_buffer(ano, 1, 0)))) goto read_err;\
 	if (__unlikely(SPAD2CPU32_LV(&anode->magic) != magic(ano, ANODE_MAGIC)))									\
 		goto magic_err;						\
 } while (0)
-	if (anode->flags & ANODE_CHECKSUM_VALID && __unlikely(__byte_sum(anode, ANODE_SIZE) != CHECKSUM_BASE)) {
-		log_printf(0, "%s: BAD CHECKSUM ON ANODE %"blk_format"X: %02X", get_filename(p), ano, __byte_sum(anode, ANODE_SIZE) ^ CHECKSUM_BASE);
+	if (anode->flags & ANODE_CHECKSUM_VALID && __unlikely(spadfs_meta_verify(anode))) {
+		log_printf(0, "%s: BAD CHECKSUM ON ANODE %"blk_format"X: stored %08X computed %08X", get_filename(p), ano, spadfs_meta_stored_crc(anode), spadfs_meta_computed_crc(anode));
 		if (query(qprefix 0, "FIX?")) {
 			update_anode;
 			*was_error = 2;

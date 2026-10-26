@@ -7,7 +7,8 @@
 struct fixed_fnode_block *update_fixed_fnode_block(struct fixed_fnode_block *fx, blk_t blk)
 {
 	fx->flags |= FIXED_FNODE_BLOCK_CHECKSUM_VALID;
-	fx->checksum ^= CHECKSUM_BASE ^ __byte_sum(fx, FIXED_FNODE_BLOCK_SIZE);
+	fx->checksum = 0;	/* legacy XOR field, vestigial */
+	spadfs_meta_seal(fx);	/* trailer_crc sits at 508 (Phase 2.2 Cat 2) */
 	if (__unlikely(write_buffer(blk, 1, fx))) return NULL;
 	return reread_fixed_fnode_block(blk);
 }
@@ -72,8 +73,8 @@ int read_fixed_fnode(blk_t blk, int directory, struct fixed_fnode_block **result
 		if (end < blk + (1 << super.sectors_per_block_bits)) return 1;
 	}
 
-	if (fx->flags & FIXED_FNODE_BLOCK_CHECKSUM_VALID && __unlikely(__byte_sum(fx, FIXED_FNODE_BLOCK_SIZE) != CHECKSUM_BASE)) {
-		log_printf(0, "%s: BAD CHECKSUM ON FIXED FNODE BLOCK %"blk_format"X: %02X", get_filename(p), blk, __byte_sum(fx, FIXED_FNODE_BLOCK_SIZE) ^ CHECKSUM_BASE);
+	if (fx->flags & FIXED_FNODE_BLOCK_CHECKSUM_VALID && __unlikely(spadfs_meta_verify(fx))) {
+		log_printf(0, "%s: BAD CHECKSUM ON FIXED FNODE BLOCK %"blk_format"X: stored %08X computed %08X", get_filename(p), blk, spadfs_meta_stored_crc(fx), spadfs_meta_computed_crc(fx));
 		if (query(qprefix 0, "FIX?")) {
 			if (__unlikely(!(fx = update_fixed_fnode_block(fx, blk)))) {
 				fix_err:

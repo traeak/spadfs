@@ -612,7 +612,8 @@ static void write_root_fixed_fnode(void)
 	CPU2SPAD16_LV(&fn->run2n, metadata_groups + smallfile_groups);
 	fn->flags = FNODE_FLAGS_DIR;
 	fn->namelen = 0;
-	fx->checksum = CHECKSUM_BASE ^ __byte_sum(fx, FIXED_FNODE_BLOCK_SIZE);
+	fx->checksum = 0;	/* legacy XOR field, vestigial; trailer is authoritative */
+	spadfs_meta_seal(fx);	/* fixed_fnode_block.trailer_crc sits at 508 */
 	write_blocks(buffer, root_fnode_sector, block_sectors);
 #undef fn
 }
@@ -635,6 +636,7 @@ static void write_root_dir(void)
 		CPU2SPAD16_LV(&f->cc, 0);
 		CPU2SPAD32_LV(&f->txc, 0);
 		b->checksum = CHECKSUM_BASE ^ __byte_sum(b, FNODE_BLOCK_SIZE);
+		/* fnode blocks stay on the XOR fold -- see struct.h FNODE_MAX_SIZE */
 	}
 	write_blocks(buffer, root_dir_sector, ROOT_DIR_SECTORS);
 }

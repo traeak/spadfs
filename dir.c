@@ -4,6 +4,15 @@
 void really_do_fnode_block_checksum(struct fnode_block *fnode_block)
 {
 	fnode_block->flags |= FNODE_BLOCK_CHECKSUM_VALID;
+	/*
+	 * fnode blocks keep the legacy XOR fold. The 512-byte CRC trailer was
+	 * tried here and cannot work: the fnode chain is terminated by the
+	 * 512-byte block boundary itself (dir.c:576/640/1302/1573 and
+	 * VALIDATE_FNODE in dir.h), so the free fnode must tile all the way to
+	 * 512. Reserving 508..511 for a trailer would end the chain at 504 and
+	 * the walk would read the padding as a zero-size fnode -> -EFSERROR.
+	 * See the note on FNODE_MAX_SIZE in struct.h.
+	 */
 	fnode_block->checksum ^= CHECKSUM_BASE ^
 				 __byte_sum(fnode_block, FNODE_BLOCK_SIZE);
 }

@@ -425,7 +425,8 @@ int create_fixed_fnode(const struct fnode *new_fnode, const struct fnode_ea *ea,
 	CPU2SPAD16_LV(&((struct fnode *)&fx.fnode0)->next, FNODE_SIZE(0, ea_size));
 	((struct fnode *)&fx.fnode0)->namelen = 0;
 	memcpy((char *)fx.fnode0 + FNODE_EA_POS(0), ea, ea_size);
-	fx.checksum ^= CHECKSUM_BASE ^ __byte_sum(&fx, FIXED_FNODE_BLOCK_SIZE);
+	fx.checksum = 0;
+	spadfs_meta_seal(&fx);
 	if (__unlikely(!update_fixed_fnode_block(&fx, *result))) {
 		if (free_blocks(*result, 1 << super.sectors_per_block_bits) == 2) return 2;
 		return 1;
