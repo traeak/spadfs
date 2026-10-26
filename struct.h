@@ -990,9 +990,51 @@ static __finline__ unsigned char __byte_sum(void *__ptr, int __len)
 }
 #endif
 
+/*
+ * On-disk ABI guards (Phase 2.4).
+ *
+ * Several size macros in this header are hardcoded arithmetic rather than
+ * derived from sizeof, and they feed on-disk offsets -- notably
+ * SIZEOF_FNODE_BLOCK, which make_dir_off_t / dir_off_t_pos use to bit-pack
+ * directory positions. Nothing previously checked that those macros still
+ * matched the structs they describe, so adding a field to struct fnode_block
+ * would desync them silently and corrupt the directory-offset encoding on
+ * every new volume.
+ *
+ * The macro's own comment says "sizeof(struct fnode_block)", which is wrong:
+ * that struct ends with `struct fnode fnodes[1]`, so its sizeof is 80 while
+ * the macro is the 24-byte header. The assertion below expresses that header
+ * size without needing offsetof.
+ *
+ * _Static_assert catches these at build time. The runtime function is kept
+ * because it is already wired into three call sites (super.c, mkspadfs.c,
+ * sck.c) and guards against a toolchain that skips the asserts.
+ */
+/*
+ * offsetof() is not usable here: the kernel gets it from linux/stddef.h but the
+ * userspace tools do not, and adding that include to a header shared by both is
+ * the same class of coupling this file avoids. fnodes[1] is the last member, so
+ * the header size is plain arithmetic on sizeof, which works in both contexts.
+ * Measured: 80 - 56 = 24 = SIZEOF_FNODE_BLOCK.
+ */
+_Static_assert(SIZEOF_FNODE_BLOCK ==
+		(sizeof(struct fnode_block) - sizeof(struct fnode)),
+		"SIZEOF_FNODE_BLOCK desynced from struct fnode_block header");
+_Static_assert(FIXED_FNODE_BLOCK_SIZE == sizeof(struct fixed_fnode_block),
+		"FIXED_FNODE_BLOCK_SIZE desynced from struct fixed_fnode_block");
+_Static_assert(ANODE_SIZE == sizeof(struct anode),
+		"ANODE_SIZE desynced from struct anode");
+_Static_assert(sizeof(struct txblock) <= 512,
+		"txblock larger than one metadata unit");
+_Static_assert(sizeof(struct superblock) <= 512,
+		"superblock larger than one metadata unit");
+
 static __finline__ int spadfs_struct_check_correctness(void)
 {
-	return sizeof(struct dnode_page_entry) == 6;
+	return sizeof(struct dnode_page_entry) == 6 &&
+	       SIZEOF_FNODE_BLOCK == 24 &&
+	       FIXED_FNODE_BLOCK_SIZE == 512 &&
+	       ANODE_SIZE == 512;
 }
 
 #endif
