@@ -103,6 +103,29 @@ struct userblock {
 #define CCT_SIZE			(65536*4)	/* do not change it */
 #define SSIZE_BITS			9		/* --- "" --- */
 
+/*
+ * Crash-count table integrity (Phase 2.3, option A: side CRC table).
+ *
+ * The cct cannot carry the standard trailer itself. It is raw, fully-packed
+ * __u32 data with no header and no padding: every one of the 128 slots in a
+ * 512-byte sector is a live crash counter, and 128 * 512 sectors = 65536 =
+ * the whole u16 range of cc. Stealing the last 4 bytes would make every
+ * cc = 127 (mod 128) unusable, so the checksums live in a separate region
+ * instead and the cct layout is left exactly as it is.
+ *
+ * One CRC per cct sector, packed into trailer-sealed units:
+ *   512 CRCs * 4 bytes = 2048 bytes of CRC data
+ *   each unit holds SPADFS_META_COVER/4 = 127 CRCs, plus its own trailer
+ *   ceil(512 / 127) = 5 units = 2560 bytes
+ *
+ * The units are themselves sealed, so a corrupted CRC table is detected
+ * rather than silently trusted -- otherwise the checksum of checksums would
+ * be the new unprotected link.
+ */
+#define CCT_SECTORS		(CCT_SIZE >> SSIZE_BITS)			/* 512 */
+#define CCT_CRC_PER_UNIT	(SPADFS_META_COVER / 4)			/* 127 */
+#define CCT_CRC_UNITS		((CCT_SECTORS + CCT_CRC_PER_UNIT - 1) / CCT_CRC_PER_UNIT)	/* 5 */
+
 struct superblock {
 	__u8 signature[8];
 
@@ -131,7 +154,7 @@ struct superblock {
 	__u64 apage_index[2];
 	__u64 cct;
 	__u64 root;
-	__u64 pad2;
+	__u64 cct_crc;		/* start of the cct CRC region (was pad2) */
 	__u32 flags_compat_fsck;
 	__u32 flags_compat_rw;
 	__u32 flags_compat_ro;

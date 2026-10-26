@@ -280,6 +280,7 @@ void done_util(void);
 
 extern __s32 cct[65536];
 int check_cct(void);
+int check_cct_crc(void);
 int recover_cct_allocs(void);
 int fix_cct(void);
 int cc_valid(__u16 cc, __s32 txc);

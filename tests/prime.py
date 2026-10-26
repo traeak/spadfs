@@ -21,6 +21,7 @@ i.e. after a valid stripe, the XOR of all 512 bytes equals CHECKSUM_BASE.
 
 import argparse
 import os
+import struct
 import subprocess
 import sys
 
@@ -65,6 +66,90 @@ def wr16(u, off, val):
     u[off:off + 2] = (val & 0xFFFF).to_bytes(2, "little")
 
 
+# ---------------------------------------------------------------------------
+# CRC-32C (Castagnoli), matching meta_crc.h / utils/crc32c.c exactly.
+#
+# Python has no built-in crc32c (zlib.crc32 is the *other* polynomial), so the
+# table is built here. Reflected poly 0x82F63B78, init ~0, final invert -- the
+# same convention spadfs_meta_seal uses. Verified against the published check
+# vector in the self-test below.
+# ---------------------------------------------------------------------------
+_CRC32C_POLY = 0x82F63B78
+
+
+def _crc32c_table():
+    table = []
+    for i in range(256):
+        c = i
+        for _ in range(8):
+            c = (c >> 1) ^ _CRC32C_POLY if (c & 1) else (c >> 1)
+        table.append(c)
+    return table
+
+
+_CRC32C = _crc32c_table()
+
+
+def crc32c_std(data):
+    c = 0xFFFFFFFF
+    for b in data:
+        c = _CRC32C[(c ^ b) & 0xFF] ^ (c >> 8)
+    return c ^ 0xFFFFFFFF
+
+
+# meta_crc.h geometry
+META_UNIT = 512
+META_CRC_BYTES = 4
+META_COVER = META_UNIT - META_CRC_BYTES          # 508
+META_CRC_POS = META_COVER                       # 508
+
+# struct.h cct geometry
+CCT_SECTORS = 512          # CCT_SIZE >> SSIZE_BITS
+CCT_CRC_PER_UNIT = META_COVER // 4             # 127
+CCT_CRC_UNITS = (CCT_SECTORS + CCT_CRC_PER_UNIT - 1) // CCT_CRC_PER_UNIT  # 5
+
+
+def restripe_cct_crc(f, info):
+    """
+    Recompute the cct side CRC region from the cct as it now stands on disk.
+
+    prime.py writes the cct out of band, so it owns the responsibility of
+    keeping the side table consistent with it. Skipping this makes fsck report
+    a mismatch -- which is the new check working, but it breaks the fixture.
+    """
+    cct_off = info["cct"] * SECTOR
+    crc_off = info["cct_crc"] * SECTOR
+
+    f.seek(cct_off)
+    cct = f.read(CCT_SECTORS * SECTOR)
+    if len(cct) != CCT_SECTORS * SECTOR:
+        sys.exit("prime: short read of cct")
+
+    crcs = [crc32c_std(cct[i * SECTOR:(i + 1) * SECTOR])
+            for i in range(CCT_SECTORS)]
+
+    for u in range(CCT_CRC_UNITS):
+        unit = bytearray(META_UNIT)
+        for i in range(CCT_CRC_PER_UNIT):
+            sector = u * CCT_CRC_PER_UNIT + i
+            if sector >= CCT_SECTORS:
+                break
+            struct.pack_into("<I", unit, i * 4, crcs[sector])
+        struct.pack_into("<I", unit, META_CRC_POS,
+                        crc32c_std(bytes(unit[:META_COVER])))
+        f.seek(crc_off + u * SECTOR)
+        f.write(unit)
+
+
+def _self_test():
+    # published CRC-32C check vector
+    assert crc32c_std(b"123456789") == 0xE3069283, "crc32c mismatch"
+    assert crc32c_std(b"a") == 0xC1D04330, "crc32c mismatch"
+    assert CCT_CRC_UNITS == 5 and CCT_CRC_PER_UNIT == 127
+
+
+_self_test()
+
 def prime(path, new_cc, base_txc, dry_run=False):
     info = read_super(path)
     tx_off = info["txblock"] * SECTOR
@@ -106,6 +191,10 @@ def prime(path, new_cc, base_txc, dry_run=False):
             val = (base_txc + i * 97) & 0x7FFFFFFF
             f.seek(off)
             f.write(val.to_bytes(4, "little"))
+
+        # The side CRC table must describe the cct we just wrote, or fsck's
+        # new checksum pass reports the fixture itself as corrupt.
+        restripe_cct_crc(f, info)
 
     print(f"primed: cc {old_cc} -> {new_cc}, "
           f"cct[0..{new_cc}] = "

@@ -393,6 +393,9 @@ struct __spadfs {
 	sector_t apage_index0_sec;
 	sector_t apage_index1_sec;
 	sector_t cct_sec;
+	sector_t cct_crc_sec;	/* start of the cct side CRC region */
+	__u32 *cct_crc;		/* flat, CCT_SECTORS entries; in-RAM mirror of
+				 * the on-disk units (see struct.h CCT_CRC_*) */
 	sector_t root_sec;
 	sector_t size;
 	sector_t freespace;

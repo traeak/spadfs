@@ -32,6 +32,7 @@ FIELDS = [
     ("apage_index1",              64, "Q"),
     ("cct",                       72, "Q"),
     ("root",                      80, "Q"),
+    ("cct_crc",                   88, "Q"),  # was pad2
     ("flags_compat_fsck",         96, "I"),
     ("flags_compat_rw",          100, "I"),
     ("flags_compat_ro",          104, "I"),

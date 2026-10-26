@@ -333,6 +333,8 @@ int main(int argc, const char * const argv[])
 		goto ret0;
 	}
 	if (__unlikely(r = check_cct())) goto ret;
+	/* cct side CRC verification (Phase 2.3, A5) -- see check_cct_crc */
+	if (__unlikely(r = check_cct_crc())) goto ret;
 	if (__unlikely(r = check_apages())) goto ret;
 	if (__unlikely(r = check_dir_tree())) goto ret;
 	if (__unlikely(r = fix_cct())) goto ret;

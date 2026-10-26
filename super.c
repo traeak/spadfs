@@ -671,6 +671,49 @@ static int spadfs_start_new_tx(SPADFS *fs)
 	return 0;
 }
 
+/*
+ * Mirror the cct sectors just written into the side CRC region (Phase 2.3, A5).
+ *
+ * Only the unit(s) covering [first, last] are rewritten. With 127 CRCs per
+ * unit and a buffer of a power-of-two sector count, a commit normally touches
+ * one unit; the loop covers the straddle case rather than assuming it away.
+ *
+ * The unit is fully packed -- 127 * 4 = 508 = SPADFS_META_COVER -- so the
+ * trailer lands exactly at the end with no gap.
+ */
+static int spadfs_write_cct_crc(SPADFS *fs, unsigned first, unsigned last)
+{
+	unsigned u, i;
+
+	for (u = first / CCT_CRC_PER_UNIT;
+	     u <= last / CCT_CRC_PER_UNIT && u < CCT_CRC_UNITS; u++) {
+		struct buffer_head *cbh;
+		__u8 *unit = spadfs_get_new_sector(fs, fs->cct_crc_sec + u, &cbh,
+						"spadfs_write_cct_crc");
+
+		if (unlikely(IS_ERR(unit)))
+			return PTR_ERR(unit);
+
+		start_atomic_buffer_modify(fs, cbh);
+		for (i = 0; i < CCT_CRC_PER_UNIT; i++) {
+			unsigned sector = u * CCT_CRC_PER_UNIT + i;
+
+			spadfs_meta_put_crc(unit + i * 4,
+					    sector < CCT_SECTORS ? fs->cct_crc[sector] : 0);
+		}
+		spadfs_meta_seal(unit);
+		end_atomic_buffer_modify(fs, cbh);
+
+		{
+			int rr = spadfs_sync_dirty_buffer(cbh);
+			spadfs_brelse(fs, cbh);
+			if (unlikely(rr))
+				return rr;
+		}
+	}
+	return 0;
+}
+
 int spadfs_commit_unlocked(SPADFS *fs)
 {
 	int r, rr;
@@ -735,6 +778,42 @@ int spadfs_commit_unlocked(SPADFS *fs)
 		if (!r)
 			r = rr;
 		goto unlock_ret;
+	}
+
+	/*
+	 * Compute and write the side CRCs for the cct sectors we just pushed.
+	 *
+	 * This MUST happen before spadfs_start_new_tx: that call increments
+	 * fs->cct[fs->cc], and a CRC taken after the increment would describe
+	 * bytes that are not the bytes on disk. Computing from the same
+	 * snapshot the memcpy used is what keeps the pair meaningful.
+	 *
+	 * Ordering of the two writes is cct-then-crc. A crash in between leaves
+	 * the crc describing the previous cct, which fsck reports as a
+	 * mismatch. That is the fail-safe direction: it over-reports rather
+	 * than blessing a torn cct. Nothing fails at mount, so a crash here is
+	 * recoverable rather than fatal -- see the A5 rationale in
+	 * spadfs_fill_super.
+	 */
+	{
+		unsigned nsec = 1U << fs->sectors_per_buffer_bits;
+		unsigned last = sector + nsec - 1;
+		unsigned sc;
+
+		if (last >= CCT_SECTORS)
+			last = CCT_SECTORS - 1;
+		for (sc = sector; sc <= last; sc++)
+			fs->cct_crc[sc] = spadfs_crc32c_std((char *)fs->cct + (sc << 9), 512);
+
+		rr = spadfs_write_cct_crc(fs, sector, last);
+		if (unlikely(rr)) {
+			spadfs_error(fs, TXFLAGS_IO_WRITE_ERROR,
+				"write error in cct crc table: %d", rr);
+			spadfs_update_error_flags(fs);
+			if (!r)
+				r = rr;
+			goto unlock_ret;
+		}
 	}
 
 	rr = spadfs_start_new_tx(fs);
@@ -1305,6 +1384,7 @@ read_again:
 	fs->apage_index0_sec = SPAD2CPU64_LV(&sb->apage_index[0]);
 	fs->apage_index1_sec = SPAD2CPU64_LV(&sb->apage_index[1]);
 	fs->cct_sec = SPAD2CPU64_LV(&sb->cct);
+	fs->cct_crc_sec = SPAD2CPU64_LV(&sb->cct_crc);
 	fs->root_sec = SPAD2CPU64_LV(&sb->root);
 	fs->size = SPAD2CPU64_LV(&sb->size);
 	fs->reserve_sectors = SPAD2CPU64_LV(&sb->reserve_sectors);
@@ -1390,6 +1470,32 @@ read_again:
 		spadfs_brelse(fs, bh);
 	}
 	fs->txc = SPAD2CPU32_LV(&fs->cct[fs->cc]);
+
+	/*
+	 * In-RAM mirror of the cct side CRCs (Phase 2.3, option A5).
+	 *
+	 * Computed from fs->cct, NOT read back from disk, and never verified
+	 * here. The kernel's only job with this table is to keep it in step with
+	 * the cct it just wrote; verification is fsck's, offline.
+	 *
+	 * Mount-time verification was implemented and then rejected. The cct is
+	 * written on every commit (spadfs_commit_unlocked), so checking its CRC
+	 * at mount would turn an ordinary crash between the cct write and the
+	 * CRC write into an unmountable volume -- trading a rare bit-rot class
+	 * for a common availability cliff. The cct's own cc/txc handshake
+	 * already handles crash tolerance; a CRC cannot improve on that without
+	 * dual-copying the region.
+	 */
+	if (unlikely(!(fs->cct_crc = spadfs_alloc(1, CCT_SECTORS * sizeof(__u32), 0)))) {
+		r = -ENOMEM;
+		goto err3;
+	}
+	{
+		unsigned s;
+
+		for (s = 0; s < CCT_SECTORS; s++)
+			fs->cct_crc[s] = spadfs_crc32c_std((u8 *)fs->cct + (s << 9), 512);
+	}
 
 	fs->n_apages = N_APAGES(fs->size, fs->pagesize_bits, fs->sectors_per_disk_block_bits + 9);
 	n = APAGE_INDEX_SECTORS(fs->n_apages, 512U << fs->sectors_per_disk_block_bits);
@@ -1604,6 +1710,7 @@ __cold static void spadfs_free_super(struct super_block *s)
 	spadfs_cond_resched();
 
 	kvfree(fs->cct);
+	kvfree(fs->cct_crc);
 
 	if (fs->inode_list) {
 		for (i = 0; i < SPADFS_INODE_HASH_SIZE; i++)

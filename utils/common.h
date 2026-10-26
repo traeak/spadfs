@@ -154,6 +154,7 @@ static __finline__ void __PREFETCHNTA(void *p) {}
 
 #include "list.h"
 #include "endian.h"
+#include "../meta_crc.h"
 #include "../struct.h"
 
 #else

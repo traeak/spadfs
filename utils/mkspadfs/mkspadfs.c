@@ -71,7 +71,8 @@ error(int x, int y, char *m, ...)
 	4002+apage_index_sectors,apage_index_sectors (apage_index_1_sector) -- apage index 1
 	4002+2*apage_index_sectors,n_apages*page_size (apages_sector) -- apages
 	apages_sector+n_apages*page_size,512 (cct_sector) -- txc table
-	cct_sector+512,1 -- root fnode
+	cct_sector+CCT_SECTORS -- cct_crc_sector, CCT_CRC_UNITS of side CRCs
+	cct_crc_sector+CCT_CRC_UNITS -- root fnode
 	64 (ROOT_DIR) -- root directory
 	-- free space
 	superblock backup
@@ -81,7 +82,9 @@ error(int x, int y, char *m, ...)
 
 #define CLEAR_BUFFERS		(1 << MAX_SECTORS_PER_BLOCK_BITS)
 
-#define CCT_SECTORS		(CCT_SIZE / 512)
+/* CCT_SECTORS now comes from struct.h (CCT_SIZE >> SSIZE_BITS, same 512);
+ * the local duplicate was removed so there is one definition of the cct's
+ * sector count in the tree. */
 /*#define ROOT_DIR_SECTORS	fnode_sectors*/
 #define ROOT_DIR_SECTORS	block_sectors
 
@@ -156,6 +159,8 @@ static __u64 apage_index_0_sector;
 static __u64 apage_index_1_sector;
 static __u64 apages_sector;
 static __u64 cct_sector;
+static __u64 cct_crc_sector;
+static __u64 cct_crc_sectors;	/* CCT_CRC_UNITS rounded up to whole blocks */
 static __u64 root_fnode_sector;
 static __u64 root_dir_sector;
 
@@ -335,7 +340,18 @@ static void check_valid(void)
 	apage_index_1_sector = block_align(apage_index_0_sector + apage_index_sectors);
 	apages_sector = page_align(apage_index_1_sector + apage_index_sectors);
 	cct_sector = block_align(apages_sector + (n_apages << (page_bits - 9)));
-	root_fnode_sector = block_align(cct_sector + 512);
+	cct_crc_sector = block_align(cct_sector + CCT_SECTORS);
+	/*
+	 * Round the CRC region up to whole blocks and start root_fnode directly
+	 * after it. Leaving block_align() to round the END instead produced a
+	 * short, non-block-aligned gap (3 sectors at 17093 on a 4K-block volume)
+	 * which had to be freed, and fsck rejected it:
+	 *   APAGE 0 (4080) HAS UNALIGNED ENTRY 0030 (42C5 - 42C8)
+	 * Whole-block rounding means there is no gap to free and nothing ragged
+	 * for the allocator to trip over.
+	 */
+	cct_crc_sectors = ((CCT_CRC_UNITS + block_sectors - 1) / block_sectors) * block_sectors;
+	root_fnode_sector = cct_crc_sector + cct_crc_sectors;
 	root_dir_sector = fnode_align(root_fnode_sector + block_sectors, ROOT_DIR_SECTORS);
 }
 
@@ -484,6 +500,7 @@ static void write_super(void)
 	CPU2SPAD64_LV(&sb->apage_index[0], apage_index_0_sector);
 	CPU2SPAD64_LV(&sb->apage_index[1], apage_index_1_sector);
 	CPU2SPAD64_LV(&sb->cct, cct_sector);
+	CPU2SPAD64_LV(&sb->cct_crc, cct_crc_sector);
 	CPU2SPAD64_LV(&sb->root, root_fnode_sector);
 	if (unix_names)
 		CPU2SPAD32_LV(&sb->flags_compat_none, SPAD2CPU32_LV(&sb->flags_compat_none) | FLAG_COMPAT_NONE_UNIX_NAMES);
@@ -523,6 +540,43 @@ static void write_txct(void)
 	for (i = 0; i < CCT_SECTORS; i += block_sectors) {
 		print_progress(CCT_SECTORS, i);
 		write_blocks(buffer, cct_sector + i, block_sectors);
+	}
+}
+
+/*
+ * Side CRC table for the crash-count table (Phase 2.3, option A).
+ *
+ * The cct cannot carry the standard trailer itself. It is fully-packed live
+ * __u32 crash counters with no header and no padding, and 128 slots * 512
+ * sectors consumes the entire u16 range of cc. Taking the last 4 bytes of
+ * each sector would make every cc == 127 (mod 128) unusable, so the
+ * checksums get their own region and the cct layout is left exactly as it is.
+ *
+ * One CRC per cct sector, CCT_CRC_PER_UNIT of them packed into each 512-byte
+ * unit, and every unit sealed with the standard trailer -- otherwise the
+ * checksum of checksums would just become the new unprotected link.
+ *
+ * At mkfs time the cct is all zeros, so every entry is the CRC of a zeroed
+ * sector. That is still recorded explicitly: what matters is that the stored
+ * value matches what is on disk, not that it is interesting.
+ */
+static void write_cct_crc(void)
+{
+	static __u8 zero_sector[512];
+	__u8 unit[512];
+	unsigned u, i;
+
+	for (u = 0; u < CCT_CRC_UNITS; u++) {
+		memset(unit, 0, sizeof unit);
+		for (i = 0; i < CCT_CRC_PER_UNIT; i++) {
+			unsigned sector = u * CCT_CRC_PER_UNIT + i;
+			if (sector >= CCT_SECTORS)
+				break;
+			spadfs_meta_put_crc(unit + i * 4,
+					    spadfs_crc32c_std(zero_sector, 512));
+		}
+		spadfs_meta_seal(unit);
+		write_blocks(unit, cct_crc_sector + u, 1);
 	}
 }
 
@@ -635,7 +689,6 @@ static void write_apages(void)
 	}
 	if (free_range(apg, apage_index_1_sector + apage_index_sectors, apages_sector - (apage_index_1_sector + apage_index_sectors))) goto err;
 	if (free_range(apg, root_fnode_sector + block_sectors, root_dir_sector - (root_fnode_sector + block_sectors))) goto err;
-	if (free_range(apg, cct_sector + 512, root_fnode_sector - (cct_sector + 512))) goto err;
 	ptr = root_dir_sector + ROOT_DIR_SECTORS;
 	next_block:
 	if (ptr > size) error(2, 0, "\rtoo small filesystem");
@@ -922,6 +975,7 @@ int main(int argc, const char * const argv[])
 	/*write_apage_index(apage_index_1_sector);*/
 	fprintf(stderr, "\rwriting crash count table...\n");
 	write_txct();
+	write_cct_crc();
 	fprintf(stderr, "\rwriting root fixed fnode...\n");
 	write_root_fixed_fnode();
 	fprintf(stderr, "\rwriting root directory...\n");

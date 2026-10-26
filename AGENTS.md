@@ -56,6 +56,22 @@ includes, casts, or declarations to satisfy a tool that cannot see the kernel.
 
 **Never claim a change is verified based on LSP output alone in this repo.**
 
+### Known non-actionable reserved-identifier reports
+
+Three classes of "🔴 must fix" reserved-namespace findings recur on every turn in
+this tree and **must not be "fixed"**. They are not defects and renaming them
+breaks the build or the thing being guarded:
+
+| Report | Why it is wrong to act on it |
+|---|---|
+| `__KERNEL__` (e.g. `meta_crc.h:41`) | Predefined by the compiler itself. `echo \| gcc -dM -E -D__KERNEL__` shows the toolchain owns this name. It is how every kernel source file distinguishes kernel from userspace. |
+| `__cold` (`linux-compat.h:155-156`) | Kernel/compiler attribute vocabulary. Used as an attribute at `super.c:3`, `super.c:146`, `super.c:361`. The `#ifndef __cold` guard exists precisely to *supply* it on toolchains that lack it — renaming makes the guard test for the wrong symbol and the fallback never fires. |
+| `_SPADFS_LINUX_COMPAT_H` and friends | Include guards. Leading `_` + uppercase is technically reserved by C, but this is the established convention across **all 6 headers** in the tree (`_SPADFS_COMMON_STRUCT_H`, `_SPADFS_SPADFS_H`, `_SPADFS_COMMON_ENDIAN_H`, `_SPADFS_UTILS_ENDIAN_H`, `_SPADFS_COMMON_SFSAPAGE_H`, `_SPADFS_SPADFSCK_SCK_H`). Renaming one breaks consistency with the rest. |
+
+If a new report of this shape appears, check whether the identifier is
+compiler-predefined, kernel-provided, or tree-conventional before treating it as
+actionable. The arbiter is still GCC via kbuild, per Rule 1 above.
+
 ---
 
 ## Rule 2 — Build and verification

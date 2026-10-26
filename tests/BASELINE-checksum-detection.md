@@ -29,20 +29,20 @@ target whose contents the class can actually change.
 | apage_index | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
 | apage_index | xor_cancel | DETECTED | DETECTED | detected |
 | apage_index | zero_out | DETECTED | DETECTED | detected |
-| cct | bitflip | MISSED | MISSED | **NOT DETECTED** |
-| cct | byte_transpose | MISSED | MISSED | **NOT DETECTED** |
+| cct | bitflip | DETECTED | DETECTED | detected |
+| cct | byte_transpose | DETECTED | DETECTED | detected |
 | cct | word_swap | DETECTED | DETECTED | detected |
 | cct | word_dup | DETECTED | DETECTED | detected |
 | cct | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
 | cct | xor_cancel | DETECTED | DETECTED | detected |
-| cct | zero_out | MISSED | MISSED | **NOT DETECTED** |
-| cct_live | bitflip | MISSED | MISSED | **NOT DETECTED** |
-| cct_live | byte_transpose | MISSED | MISSED | **NOT DETECTED** |
+| cct | zero_out | DETECTED | DETECTED | detected |
+| cct_live | bitflip | DETECTED | DETECTED | detected |
+| cct_live | byte_transpose | DETECTED | DETECTED | detected |
 | cct_live | word_swap | DETECTED | DETECTED | detected |
 | cct_live | word_dup | DETECTED | DETECTED | detected |
 | cct_live | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
 | cct_live | xor_cancel | DETECTED | DETECTED | detected |
-| cct_live | zero_out | MISSED | MISSED | **NOT DETECTED** |
+| cct_live | zero_out | DETECTED | DETECTED | detected |
 | root_fnode | bitflip | DETECTED | DETECTED | detected |
 | root_fnode | byte_transpose | DETECTED | DETECTED | detected |
 | root_fnode | word_swap | DETECTED | DETECTED | detected |
@@ -61,6 +61,6 @@ target whose contents the class can actually change.
 ## Summary
 
 - cases attempted: 49
-- detected: 31
-- **NOT detected: 7**
+- detected: 37
+- **NOT detected: 1**
 - not applicable / harness error: 11

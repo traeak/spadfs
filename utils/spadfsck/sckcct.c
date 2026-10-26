@@ -80,6 +80,118 @@ int check_cct(void)
 	return 0;
 }
 
+/*
+ * Verify the crash count table against its side CRC table (Phase 2.3, A5).
+ *
+ * This closes the original finding. Before the side table existed the cct had
+ * NO integrity coverage at all: it was copied with a plain spadfs_memcpy and
+ * never checksummed, so corrupting it -- including flipping the sign that
+ * CC_VALID tests -- left spadfsck reporting a clean filesystem. See
+ * tests/BASELINE-cct-integrity.md.
+ *
+ * Two layers, and both are required:
+ *
+ *   1. each CRC unit's own trailer. Skip this and the CRC table becomes the
+ *      new unprotected link -- corrupt it and either every sector looks bad,
+ *      or a crafted table blesses a corrupt cct.
+ *   2. each cct sector against its stored CRC.
+ *
+ * If layer 1 fails we stop rather than proceed to layer 2: comparing the cct
+ * against CRCs we do not trust would produce meaningless verdicts in both
+ * directions.
+ *
+ * Verification is deliberately offline. The kernel does NOT check this at
+ * mount, because the cct is written on every commit and a mount-time check
+ * would turn an ordinary crash between the cct write and the CRC write into
+ * an unmountable volume.
+ */
+int check_cct_crc(void)
+{
+	static __u32 stored[CCT_SECTORS];
+	unsigned u, i;
+	int r;
+	int bad_units = 0, bad_sectors = 0;
+
+	status_printf(0, "checking crash count table checksums...");
+
+	if (SPAD2CPU64_LV(&super.cct_crc) == 0) {
+		log_printf(0, "NO CCT CRC REGION IN SUPERBLOCK");
+		return 0;
+	}
+
+	/*
+	 * Reserve the region, exactly as check_cct does for the cct itself.
+	 * Without this fsck sees the CRC blocks as used-in-map but claimed by
+	 * nothing, and reports them lost:
+	 *   FILESYSTEM HAS 8 LOST SECTORS IN 1 RUNS
+	 * The count is CCT_CRC_UNITS rounded up to whole blocks, matching what
+	 * mkspadfs reserves for the region.
+	 */
+	{
+		blk_t block_sectors = (blk_t)1 << super.sectors_per_block_bits;
+		blk_t span = ((blk_t)CCT_CRC_UNITS + block_sectors - 1)
+			   / block_sectors * block_sectors;
+		if (__unlikely(r = alloc_blocks(SPAD2CPU64_LV(&super.cct_crc), span))) {
+			if (r == 1) log_printf(0, "CCT CRC REGION ALLOCATION ERROR: %s", alloc_error);
+			return 0;
+		}
+	}
+
+	for (u = 0; u < CCT_CRC_UNITS; u++) {
+		unsigned char *unit = read_buffer(SPAD2CPU64_LV(&super.cct_crc) + u, 1,
+						BUFFER_FREE_SOON);
+		if (__unlikely(!unit)) {
+			log_printf(0, "CANT READ CCT CRC UNIT %u: %s", u, buffer_error);
+			return 0;
+		}
+		if (__unlikely(spadfs_meta_verify(unit))) {
+			if (bad_units < MAX_SAME_ERRORS) {
+				log_printf(0, "CCT CRC UNIT %u CHECKSUM MISMATCH", u);
+				if (++bad_units == MAX_SAME_ERRORS) log_suppress();
+			} else {
+				bad_units++;
+			}
+			continue;
+		}
+		for (i = 0; i < CCT_CRC_PER_UNIT; i++) {
+			unsigned sector = u * CCT_CRC_PER_UNIT + i;
+			if (sector >= CCT_SECTORS)
+				break;
+			stored[sector] = spadfs_meta_get_crc(unit + i * 4);
+		}
+	}
+
+	if (__unlikely(bad_units)) {
+		log_printf(0, "CCT CRC TABLE UNTRUSTWORTHY (%d BAD UNIT(S)); CANNOT VERIFY CCT",
+			   bad_units);
+		return 1;
+	}
+
+	for (i = 0; i < CCT_SECTORS; i++) {
+		unsigned char *sec = read_buffer(SPAD2CPU64_LV(&super.cct) + i, 1,
+					       BUFFER_FREE_SOON);
+		if (__unlikely(!sec)) {
+			log_printf(0, "CANT READ CCT SECTOR %u: %s", i, buffer_error);
+			return 0;
+		}
+		if (__unlikely(spadfs_crc32c_std(sec, 512) != stored[i])) {
+			if (bad_sectors < MAX_SAME_ERRORS) {
+				log_printf(0, "CCT SECTOR %u DOES NOT MATCH ITS CHECKSUM", i);
+				if (++bad_sectors == MAX_SAME_ERRORS) log_suppress();
+			} else {
+				bad_sectors++;
+			}
+		}
+	}
+
+	if (__unlikely(bad_sectors)) {
+		log_printf(0, "CRASH COUNT TABLE CORRUPT: %d SECTOR(S) FAIL CHECKSUM", bad_sectors);
+		return 1;
+	}
+
+	return 0;
+}
+
 int recover_cct_allocs(void)
 {
 	if (cct_valid) {

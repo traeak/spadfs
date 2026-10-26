@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
-# The crash-count table has no checksum. This test proves it, and shows that the
-# consequence is semantic, not cosmetic.
+# Crash-count table integrity: does fsck notice a corrupted cct?
 #
-# Background: sckcct.c validates cct entries with one rule only -- entries ABOVE
-# tx.cc must be zero, and no entry may have the 0x80000000 bit set. There is no
+# This test was written to prove the cct had NO checksum at all -- it did, and the
+# consequence was semantic, not cosmetic: flipping the sign that CC_VALID tests
+# left spadfsck reporting a clean volume. Three of the six classes here were
+# silent.
+#
+# Phase 2.3 (option A5) closed that with a side CRC table, because the cct
+# itself cannot carry the standard trailer: it is fully-packed live __u32 crash
+# counters, 128 per sector * 512 sectors = the whole u16 range of cc, so
+# stealing 4 bytes would make every cc == 127 (mod 128) unusable.
+#
+# Original background: sckcct.c validates cct entries with one rule only --
+# entries ABOVE tx.cc must be zero, and no entry may have the 0x80000000 bit
+# set. There is no
 # __byte_sum over the cct anywhere (contrast super.c:507 for the txblock). So
 # corruption confined to cct[tx.cc] -- the live entry every CC_VALID() decision
 # reads -- is invisible.
@@ -114,10 +124,16 @@ done
 printf '\n## Summary\n\n'
 printf -- '- live entry corrupted without any fsck complaint: **%d**\n' "$silent_corrupt"
 printf -- '- of those, CC_VALID flipped: **%d**\n' "$silent_flips"
-printf '\nThe detections that *do* happen come from the ordering rule in\n'
-printf 'sckcct.c (entries above tx.cc must be zero), not from a checksum --\n'
-printf 'which is why classes that spill above cc are caught and classes confined\n'
-printf 'to cct[cc] itself are not.\n'
+if [ "$silent_corrupt" -eq 0 ]; then
+	printf '\nAll classes are now caught by the cct side CRC table '
+	printf '(check_cct_crc, Phase 2.3 A5).\n'
+	printf 'Before it, three of these six were silent -- including zero_out, '
+	printf 'which\nflipped CC_VALID True->False on a volume fsck called clean.\n'
+else
+	printf '\nRemaining silent detections fall through both the ordering rule in '
+	printf 'sckcct.c\n(entries above tx.cc must be zero) and the cct side CRC '
+	printf 'table -- investigate.\n'
+fi
 
 if [ "$STRICT" -eq 1 ] && [ "$silent_corrupt" -gt 0 ]; then
 	printf '\nSTRICT: %d silent corruption(s) remain. Phase 3 not done.\n' "$silent_corrupt"
