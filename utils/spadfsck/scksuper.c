@@ -34,8 +34,10 @@ static __u64 detect_size(void)
 
 void write_super(void)
 {
-	super.checksum = 0;
-	super.checksum = CHECKSUM_BASE ^ __byte_sum(&super, 512);
+	super.checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
+				 * zeroed to a deterministic value so the trailer
+				 * covers it; the superblock trailer is authoritative */
+	spadfs_meta_seal(&super);
 	write_buffer(SUPERBLOCK_SECTOR, 1, &super);
 	primary_valid = 1;
 	if (backup_accessible) {
@@ -48,16 +50,20 @@ void write_txblock(void)
 {
 	if (tx_valid) {
 		CPU2SPAD32_LV(&tx.magic, magic(SPAD2CPU64_LV(&super.txblock), TXBLOCK_MAGIC));
-		tx.checksum = 0;
-		tx.checksum = CHECKSUM_BASE ^ __byte_sum(&tx, 512);
+		tx.checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
+					 * zeroed to a deterministic value so the trailer
+					 * covers it; the txblock trailer is authoritative */
+		spadfs_meta_seal(&tx);
 		write_buffer(SPAD2CPU64_LV(&super.txblock), 1, &tx);
 	}
 }
 
 static void write_user(void)
 {
-	user.checksum = 0;
-	user.checksum = CHECKSUM_BASE ^ __byte_sum(&user, 512);
+	user.checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
+				 * zeroed to a deterministic value so the trailer
+				 * covers it; the userblock trailer is authoritative */
+	spadfs_meta_seal(&user);
 	write_buffer(USERBLOCK_SECTOR, 1, &user);
 }
 
@@ -211,8 +217,9 @@ static int check_sb2(void)
 {
 	int r;
 	int did_not_fix = 0;
-	if (__unlikely(__byte_sum(&super, 512) != CHECKSUM_BASE)) {
-		log_printf(0, "BAD CHECKSUM ON SUPERBLOCK: %02X", __byte_sum(&super, 512) ^ CHECKSUM_BASE);
+	if (__unlikely(spadfs_meta_verify(&super))) {
+		log_printf(0, "BAD CHECKSUM ON SUPERBLOCK: stored %08X computed %08X",
+			   spadfs_meta_stored_crc(&super), spadfs_meta_computed_crc(&super));
 		if (query(qprefix 0, "FIX?")) {
 			write_super();
 			mark_dirty = 1;
@@ -359,8 +366,10 @@ static int check_txb(void)
 		log_printf(0, "BAD MAGIC ON TX BLOCK %"blk_format"X", SPAD2CPU64_LV(&super.txblock));
 		goto tx_error;
 	}
-	if (__unlikely(__byte_sum(t, 512) != CHECKSUM_BASE)) {
-		log_printf(0, "BAD CHECKSUM ON TX BLOCK %"blk_format"X: %02X", SPAD2CPU64_LV(&super.txblock), __byte_sum(t, 512) ^ CHECKSUM_BASE);
+	if (__unlikely(spadfs_meta_verify(t))) {
+		log_printf(0, "BAD CHECKSUM ON TX BLOCK %"blk_format"X: stored %08X computed %08X",
+			   SPAD2CPU64_LV(&super.txblock), spadfs_meta_stored_crc(t),
+			   spadfs_meta_computed_crc(t));
 		goto tx_error;
 	}
 	if (__unlikely(r = alloc_blocks(SPAD2CPU64_LV(&super.txblock), (1 << super.sectors_per_block_bits)))) {
@@ -408,8 +417,9 @@ static int check_ub(void)
 	if (__unlikely(u->magic != CPU2SPAD32(USERBLOCK_MAGIC)))
 		goto skip_ub;
 
-	if (__unlikely(__byte_sum(u, 512) != CHECKSUM_BASE)) {
-		log_printf(0, "BAD CHECKSUM ON USERBLOCK: %02X", __byte_sum(u, 512) ^ CHECKSUM_BASE);
+	if (__unlikely(spadfs_meta_verify(u))) {
+		log_printf(0, "BAD CHECKSUM ON USERBLOCK: stored %08X computed %08X",
+			   spadfs_meta_stored_crc(u), spadfs_meta_computed_crc(u));
 		ask_rewrite = 1;
 		goto skip_ub;
 	}

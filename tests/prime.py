@@ -46,8 +46,26 @@ def xor_all(buf):
 
 
 def restripe(u, cksum_off):
-    """Set the checksum byte so XOR(all 512 bytes) == CHECKSUM_BASE."""
+    """Set the checksum byte so XOR(all 512 bytes) == CHECKSUM_BASE.
+
+    Legacy: only valid for units still using the 8-bit XOR field. Cat 1
+    (Phase 2.2) moved superblock/txblock/userblock to the CRC trailer --
+    those must use seal_unit() instead, or the trailer goes stale and fsck
+    correctly rejects the fixture.
+    """
     u[cksum_off] ^= xor_all(u) ^ CHECKSUM_BASE
+
+
+def seal_unit(u, legacy_cksum_off):
+    """
+    Zero the legacy 8-bit XOR field and write the CRC-32C trailer, matching
+    spadfs_tx_block_checksum() / spadfs_meta_seal() exactly.
+
+    The legacy field is zeroed rather than left alone so the sealed bytes are
+    deterministic -- the same reason the kernel does it.
+    """
+    u[legacy_cksum_off] = 0
+    struct.pack_into("<I", u, META_CRC_POS, crc32c_std(bytes(u[:META_COVER])))
 
 
 def rd32(u, off):
@@ -170,10 +188,13 @@ def prime(path, new_cc, base_txc, dry_run=False):
             wr16(tx, TX_A_CC, new_cc)
 
         wr16(tx, TX_CC, new_cc)
-        restripe(tx, TX_CHECKSUM)
+        # The txblock is a Cat 1 unit: trailer-authoritative. Restriping the
+        # old XOR byte would leave the trailer stale.
+        seal_unit(tx, TX_CHECKSUM)
 
-        # Sanity: the stripe must hold.
-        assert xor_all(tx) == CHECKSUM_BASE, "txblock restripe failed"
+        # Sanity: the trailer must verify against what we just wrote.
+        assert struct.unpack_from("<I", tx, META_CRC_POS)[0] == \
+               crc32c_std(bytes(tx[:META_COVER])), "txblock seal failed"
 
         if dry_run:
             print(f"dry-run: cc {old_cc} -> {new_cc}, "

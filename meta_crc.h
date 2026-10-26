@@ -105,6 +105,39 @@ static inline void spadfs_meta_seal(void *unit)
 }
 
 /* Verify a unit. Returns 0 when intact, non-zero when corrupt. */
+/*
+ * Cross-branch alias for the CRC type. The kernel branch has __u32 and the
+ * userspace branch has uint32_t; the common section below needs to name the
+ * type for the reporting helpers, so it is aliased once here rather than
+ * duplicated per branch. Placed after the #endif so both sides have already
+ * pulled in their own definition.
+ */
+#ifdef __KERNEL__
+typedef __u32 spadfs_crc_t;
+#else
+typedef uint32_t spadfs_crc_t;
+#endif
+
+/*
+ * The two values that disagreed, for error messages. Splitting these out keeps
+ * call sites readable -- a bare "bad checksum: 00" from the old XOR fold told
+ * you almost nothing; stored-vs-computed tells you whether the trailer was
+ * zeroed, garbage, or stale.
+ */
+static inline spadfs_crc_t spadfs_meta_stored_crc(const void *unit)
+{
+	const unsigned char *u = (const unsigned char *)unit;
+
+	return spadfs_meta_get_crc(u + SPADFS_META_CRC_POS);
+}
+
+static inline spadfs_crc_t spadfs_meta_computed_crc(const void *unit)
+{
+	const unsigned char *u = (const unsigned char *)unit;
+
+	return spadfs_crc32c_std(u, SPADFS_META_COVER);
+}
+
 static inline int spadfs_meta_verify(const void *unit)
 {
 	const unsigned char *u = (const unsigned char *)unit;

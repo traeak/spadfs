@@ -434,7 +434,10 @@ static void write_user(void)
 	zerobuf();
 	CPU2SPAD32_LV(&ub->magic, USERBLOCK_MAGIC);
 	ub->userflags = 0;
-	ub->checksum = CHECKSUM_BASE ^ __byte_sum(ub, 512);
+	ub->checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
+				 * zeroed to a deterministic value so the trailer
+				 * covers it, and the userblock trailer is authoritative */
+	spadfs_meta_seal(ub);
 	write_blocks(buffer, USERBLOCK_SECTOR - (block_sectors - 1), block_sectors);
 }
 
@@ -512,7 +515,10 @@ static void write_super(void)
 		CPU2SPAD32_LV(&sb->flags_compat_none, SPAD2CPU32_LV(&sb->flags_compat_none) | FLAG_COMPAT_NONE_EXTRA_SPACE);
 	if (no_checksums)
 		CPU2SPAD32_LV(&sb->flags_compat_fsck, SPAD2CPU32_LV(&sb->flags_compat_fsck) | FLAG_COMPAT_FSCK_NO_CHECKSUMS);
-	sb->checksum = CHECKSUM_BASE ^ __byte_sum(sb, 512);
+	sb->checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
+				 * zeroed to a deterministic value so the trailer
+				 * covers it, and the superblock trailer is authoritative */
+	spadfs_meta_seal(sb);
 	if ((val = validate_super(sb))) {
 		fprintf(stderr, "\rerror: %s\n", val);
 		error(4, 0, "\rinternal error, validate_super failed. Report all arguments that you passed to " TOOL_BANNER "");
@@ -529,7 +535,10 @@ static void write_txbl(void)
 	CPU2SPAD16_LV(&txb->a_cc, 0);
 	CPU2SPAD32_LV(&txb->a_txc, 0);
 	CPU2SPAD32_LV(&txb->txflags, 0);
-	txb->checksum = CHECKSUM_BASE ^ __byte_sum(txb, 512);
+	txb->checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
+				 * zeroed to a deterministic value so the trailer
+				 * covers it, and the txblock trailer is authoritative */
+	spadfs_meta_seal(txb);
 	write_blocks(sb, txblock_sector, block_sectors);
 }
 

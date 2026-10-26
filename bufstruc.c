@@ -23,11 +23,13 @@ rel_err:
 		return ERR_PTR(-EFSERROR);
 	}
 	if (unlikely(check_checksums(fs))) {
-		if (unlikely(__byte_sum(tb, 512) != CHECKSUM_BASE)) {
+		if (unlikely(spadfs_meta_verify(tb))) {
 			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-				"bad checksum on tx block %Lx at %s",
+				"bad checksum on tx block %Lx at %s: stored %08x computed %08x",
 				(unsigned long long)fs->txb_sec,
-				msg);
+				msg,
+				spadfs_meta_stored_crc(tb),
+				spadfs_meta_computed_crc(tb));
 			goto rel_err;
 		}
 	}

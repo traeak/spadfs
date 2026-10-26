@@ -504,7 +504,19 @@ int spadfs_issue_flush(SPADFS *fs)
 
 void spadfs_tx_block_checksum(struct txblock *tb)
 {
-	tb->checksum ^= CHECKSUM_BASE ^ __byte_sum(tb, 512);
+	/*
+	 * Was the incremental XOR trick: tb->checksum ^= CHECKSUM_BASE ^
+	 * __byte_sum(tb, 512). That cannot survive a real CRC. XOR is its own
+	 * inverse, so the old trick could fold a single byte into a running
+	 * total; crc32c has no such inverse, and the trailer sits outside the
+	 * covered range, so a self-referential update would fight it.
+	 *
+	 * The legacy field is zeroed to a deterministic value -- leaving it at
+	 * whatever was there would make the CRC depend on stale bytes -- and is
+	 * then covered by the trailer, which is recomputed over the whole unit.
+	 */
+	tb->checksum = 0;
+	spadfs_meta_seal(tb);
 }
 
 static int spadfs_increase_cc(SPADFS *fs, int inc)
@@ -1314,8 +1326,10 @@ read_again:
 		r = -EINVAL;
 		goto err2;
 	}
-	if (unlikely(__byte_sum(sb, 512) != CHECKSUM_BASE)) {
-		spadfs_error(fs, TXFLAGS_FS_ERROR, "bad checksum on superblock: %02x", __byte_sum(sb, 512) ^ CHECKSUM_BASE);
+	if (unlikely(spadfs_meta_verify(sb))) {
+		spadfs_error(fs, TXFLAGS_FS_ERROR,
+			"bad checksum on superblock: stored %08x computed %08x",
+			spadfs_meta_stored_crc(sb), spadfs_meta_computed_crc(sb));
 		r = -EFSERROR;
 		goto err2;
 	}
