@@ -692,38 +692,92 @@ static int spadfs_start_new_tx(SPADFS *fs)
  *
  * The unit is fully packed -- 127 * 4 = 508 = SPADFS_META_COVER -- so the
  * trailer lands exactly at the end with no gap.
+ *
+ * BLOCK GRANULARITY, NOT SECTOR GRANULARITY.
+ *
+ * spadfs_get_new_sector() hands out a whole block (buffer.c:224 does
+ * sb_getblk(fs->s, secno >> sectors_per_buffer_bits)) and does not read the
+ * existing contents first. So writing one 512-byte unit writes every sector
+ * in that unit's block -- and the other sectors in that block hold the other
+ * units. A unit-by-unit write therefore destroys its neighbours.
+ *
+ * Observed after a real mount + write session, where only unit 0 is ever
+ * updated (cc is small, so the touched cct sector is 0):
+ *
+ *   CCT CRC UNIT 1 CHECKSUM MISMATCH
+ *   CCT CRC UNIT 2 CHECKSUM MISMATCH
+ *   CCT CRC UNIT 3 CHECKSUM MISMATCH
+ *   CCT CRC UNIT 4 CHECKSUM MISMATCH
+ *
+ * -- units 1..4 zeroed by unit 0's block write, so their trailer reads 0
+ * against a non-zero crc32c of zeros. Unit 0 verified fine. mkspadfs does
+ * not hit this because it writes with its own sector-granular write_blocks,
+ * which is why every unprivileged test passed.
+ *
+ * Fix: operate per block. Every unit sharing a block with a unit we must
+ * change is regenerated from the in-RAM cct_crc[] mirror, so no sector in
+ * the written block is left to whatever the page cache happened to hold.
  */
 static int spadfs_write_cct_crc(SPADFS *fs, unsigned first, unsigned last)
 {
-	unsigned u, i;
+	unsigned nsec = 1U << fs->sectors_per_buffer_bits;
+	unsigned first_unit = first / CCT_CRC_PER_UNIT;
+	unsigned last_unit = last / CCT_CRC_PER_UNIT;
+	unsigned b, s, i;
+	int rr = 0;
 
-	for (u = first / CCT_CRC_PER_UNIT;
-	     u <= last / CCT_CRC_PER_UNIT && u < CCT_CRC_UNITS; u++) {
+	if (last_unit >= CCT_CRC_UNITS)
+		last_unit = CCT_CRC_UNITS - 1;
+
+	/* the blocks holding the units in range */
+	for (b = (fs->cct_crc_sec + first_unit) >> fs->sectors_per_buffer_bits;
+	     b <= (fs->cct_crc_sec + last_unit) >> fs->sectors_per_buffer_bits;
+	     b++) {
 		struct buffer_head *cbh;
-		__u8 *unit = spadfs_get_new_sector(fs, fs->cct_crc_sec + u, &cbh,
-						"spadfs_write_cct_crc");
+		sector_t blk_first_unit =
+			(b << fs->sectors_per_buffer_bits) - fs->cct_crc_sec;
+		__u8 *page = spadfs_get_new_sector(fs,
+					b << fs->sectors_per_buffer_bits,
+					&cbh, "spadfs_write_cct_crc");
 
-		if (unlikely(IS_ERR(unit)))
-			return PTR_ERR(unit);
+		if (unlikely(IS_ERR(page)))
+			return PTR_ERR(page);
 
 		start_atomic_buffer_modify(fs, cbh);
-		for (i = 0; i < CCT_CRC_PER_UNIT; i++) {
-			unsigned sector = u * CCT_CRC_PER_UNIT + i;
+		/*
+		 * Zero first: the units do not fill the last block
+		 * (CCT_CRC_UNITS is not a multiple of block_sectors), and a
+		 * deterministic zero is better than stale page-cache bytes in
+		 * the padding.
+		 */
+		memset(page, 0, nsec * 512);
 
-			spadfs_meta_put_crc(unit + i * 4,
-					    sector < CCT_SECTORS ? fs->cct_crc[sector] : 0);
+		for (s = 0; s < nsec; s++) {
+			unsigned u = (unsigned)(blk_first_unit + s);
+			__u8 *unit = page + s * 512;
+
+			if (u >= CCT_CRC_UNITS)
+				continue;
+			for (i = 0; i < CCT_CRC_PER_UNIT; i++) {
+				unsigned sector = u * CCT_CRC_PER_UNIT + i;
+
+				spadfs_meta_put_crc(unit + i * 4,
+						    sector < CCT_SECTORS ?
+						    fs->cct_crc[sector] : 0);
+			}
+			spadfs_meta_seal(unit);
 		}
-		spadfs_meta_seal(unit);
 		end_atomic_buffer_modify(fs, cbh);
 
 		{
-			int rr = spadfs_sync_dirty_buffer(cbh);
+			int r = spadfs_sync_dirty_buffer(cbh);
+
 			spadfs_brelse(fs, cbh);
-			if (unlikely(rr))
-				return rr;
+			if (unlikely(r))
+				rr = r;
 		}
 	}
-	return 0;
+	return rr;
 }
 
 int spadfs_commit_unlocked(SPADFS *fs)
