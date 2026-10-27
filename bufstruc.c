@@ -58,7 +58,8 @@ struct fnode_block *spadfs_read_fnode_block(SPADFS *fs, sector_t secno,
 		   spadfs_magic(fs, secno, FNODE_BLOCK_MAGIC))) {
 		if (unlikely(!(struct_type & SRFB_FNODE)))
 			goto bad_magic;
-check_fn:
+		/* Regular fnode chain: legacy XOR fold (see the fixed-fnode
+		 * branch below for why the trailer cannot be used here). */
 		if (unlikely(check_checksums(fs)) &&
 		    likely(fnode_block->flags & FNODE_BLOCK_CHECKSUM_VALID)) {
 			start_concurrent_atomic_buffer_read(fs, *bhp);
@@ -99,7 +100,38 @@ check_fn:
 		   spadfs_magic(fs, secno, FIXED_FNODE_BLOCK_MAGIC))) {
 		if (unlikely(!(struct_type & SRFB_FIXED_FNODE)))
 			goto bad_magic;
-		goto check_fn;
+		/*
+		 * Phase 2.2 Cat 2 gave fixed_fnode_block the CRC trailer and
+		 * zeroed the legacy __byte_sum field, but this path still fell
+		 * through to check_fn, which tests the XOR. Measured on a
+		 * freshly formatted volume:
+		 *
+		 *   __byte_sum(block,512) = 0x96   CHECKSUM_BASE = 0x43  -> kernel rejects
+		 *   trailer stored        = 0x88b78f11
+		 *   trailer computed      = 0x88b78f11                    -> fsck accepts
+		 *
+		 * so every mount failed with EUCLEAN. Verify the trailer here,
+		 * matching the anode path above.
+		 */
+		if (unlikely(check_checksums(fs)) &&
+		    likely(fnode_block->flags & FNODE_BLOCK_CHECKSUM_VALID)) {
+			start_concurrent_atomic_buffer_read(fs, *bhp);
+			if (likely(fnode_block->flags &
+				   FNODE_BLOCK_CHECKSUM_VALID)) {
+				if (unlikely(spadfs_meta_verify(fnode_block))) {
+					end_concurrent_atomic_buffer_read(fs,
+									  *bhp);
+					spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+						"bad checksum on fixed fnode block %Lx at %s: stored %08x computed %08x",
+						(unsigned long long)secno, msg,
+						spadfs_meta_stored_crc(fnode_block),
+						spadfs_meta_computed_crc(fnode_block));
+					goto rel_err;
+				}
+			}
+			end_concurrent_atomic_buffer_read(fs, *bhp);
+		}
+		return fnode_block;
 	}
 bad_magic:
 	spadfs_error(fs, TXFLAGS_FS_ERROR,

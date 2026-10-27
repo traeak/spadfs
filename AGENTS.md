@@ -157,25 +157,70 @@ wrong for every other machine. They are ignored; keep them that way.
 
 ---
 
-## Rule 5 — On-disk format discipline
+## Rule 5 — Format discipline (no compatibility burden)
 
 This is a filesystem. **A bug here destroys user data, not just a process.**
 
-- **Do not change on-disk layouts.** `CCT_SIZE` and `SSIZE_BITS` are marked
-  `/* do not change it */` in `struct.h`.
-- `version_major` in the superblock **must match exactly**; `version_middle` and
-  `version_minor` are don't-care. Bumping major breaks every existing volume.
-- All on-disk pointers are in **512-byte sectors**, even when the block size is
+**Backwards compatibility is explicitly out of scope.** `spadfs2` is a clean
+break; no v1.0.22 volume must ever be mountable by it. Do not spend effort on
+compat flags, migration windows, dual-algorithm periods, or "don't misread the
+old format" code. Do not let fear of breaking an old volume block a format
+change that is otherwise correct.
+
+What follows is **not** about old volumes. These are intra-format invariants of
+the format you are building right now. Violating them corrupts the filesystem
+regardless of what came before.
+
+- **All on-disk pointers are in 512-byte sectors**, even when the block size is
   larger. Pointers must be divisible by `block_size/512`.
-- Every on-disk field goes through `CPU2SPAD*` / `SPAD2CPU*_LV`. Never assign raw.
-- Structures with `(cc, txc)` are **dual-versioned** (`fnode.size[2]`, apage
+- **Every on-disk field goes through `CPU2SPAD*` / `SPAD2CPU*_LV`.** Never
+  assign raw. `tests/roundtrip.sh` carries a `bigendian` profile precisely
+  because getting this wrong is silent and architecture-dependent.
+- **Structures with `(cc, txc)` are dual-versioned** (`fnode.size[2]`, apage
   halves, dnode versions, `fixed_fnode_block.fnode0/fnode1`). Read the state
   machine comment at `struct.h:297-313` before modifying any of them. The
-  validity test is `(s32)(cct[cc] - txc) >= 0` — sign-sensitive, do not
-  "simplify" it.
-- New extended attributes must be **skip-compatible**: unknown EA types have to be
-  ignored by older drivers (`GET_EA`, `struct.h:396`). That is how this format
-  gains features without breaking.
+  validity test is `(s32)(cct[cc] - txc) >= 0` — **sign-sensitive, do not
+  "simplify" it.** That signed comparison is the entire commit mechanism, not
+  a style choice.
+- `CCT_SIZE` and `SSIZE_BITS` are marked `/* do not change it */` in
+  `struct.h`. These are addressing-width constraints, not compat shims.
+
+### The three-reader rule
+
+**Every on-disk structure has three readers: the kernel module, `mkspadfs`, and
+`spadfsck`. A format-visible change must be made in all three, and proven by
+an actual mount.**
+
+This rule exists because we broke it. Phase 2.2 Cat 2 converted
+`fixed_fnode_block` from the XOR fold to the CRC trailer in `struct.h`,
+`mkspadfs` and `spadfsck` — but not the kernel, which still read it with
+`__byte_sum` (`bufstruc.c:103`) and wrote it with `do_fnode_block_checksum`.
+Since mkfs zeroes the legacy XOR field, the fold can never equal
+`CHECKSUM_BASE`:
+
+```text
+__byte_sum(block,512) = 0x96   CHECKSUM_BASE = 0x43   -> kernel rejects
+trailer stored        = 0x88b78f11
+trailer computed      = 0x88b78f11                   -> fsck accepts
+```
+
+**Every mount of every formatted volume failed with `EUCLEAN` — and 26 commits
+of green tests did not catch it.** The suite is `mkfs → fsck`: both readers
+were updated, so it agreed with itself perfectly while being wrong about the
+module. `anode` avoided this only because its kernel write path (`file.c:97`)
+happened to be converted too.
+
+So: when you change anything a reader validates — checksum scheme, field
+meaning, flag bits, layout —
+
+1. grep for **all three** readers, not the two that are convenient
+2. update the kernel path even when only userspace code prompted the change
+3. **mount it.** `sudo bash tests/mount_smoke.sh` exists for this. A format
+   change that has never been mounted is unverified, no matter how many
+   unprivileged tests pass.
+
+`mkfs → fsck` agreement is not evidence of correctness. It is two programs
+agreeing with each other while a third disagrees with both.
 
 ---
 

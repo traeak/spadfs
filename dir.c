@@ -13,6 +13,20 @@ void really_do_fnode_block_checksum(struct fnode_block *fnode_block)
 	 * the walk would read the padding as a zero-size fnode -> -EFSERROR.
 	 * See the note on FNODE_MAX_SIZE in struct.h.
 	 */
+	if (fnode_block->flags & FNODE_BLOCK_FIXED_TYPE) {
+		/*
+		 * fixed_fnode_block is not a chain, so it does carry the
+		 * trailer. Order matters: zero the legacy field and set every
+		 * flag bit BEFORE sealing -- the trailer covers bytes 0..507,
+		 * so touching flags afterwards would invalidate the CRC just
+		 * written. Mirrors the anode path at file.c:97-98.
+		 */
+		fnode_block->checksum = 0;
+		fnode_block->flags |= FNODE_BLOCK_CHECKSUM_VALID;
+		spadfs_meta_seal(fnode_block);
+		return;
+	}
+
 	fnode_block->checksum ^= CHECKSUM_BASE ^
 				 __byte_sum(fnode_block, FNODE_BLOCK_SIZE);
 }
@@ -212,7 +226,9 @@ int spadfs_alloc_fixed_fnode_block(SPADFNODE *fn, sector_t hint, unsigned size,
 		return PTR_ERR(fx);
 	memset(fx, 0, 512U << fs->sectors_per_buffer_bits);
 	CPU2SPAD32_LV(&fx->magic, spadfs_magic(fs, al.sector, FIXED_FNODE_BLOCK_MAGIC));
-	fx->flags = 0;
+	/* FIXED_TYPE so do_fnode_block_checksum seals the trailer instead of
+	 * XOR-folding a block that is not a fnode chain. */
+	fx->flags = FNODE_BLOCK_FIXED_TYPE;
 	/*
 	 * cc/txc doesn't matter because this block won't be used in case of
 	 * crash. Set to current (cc, txc) to prevent copy on next update.

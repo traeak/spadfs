@@ -6,7 +6,7 @@
 
 struct fixed_fnode_block *update_fixed_fnode_block(struct fixed_fnode_block *fx, blk_t blk)
 {
-	fx->flags |= FIXED_FNODE_BLOCK_CHECKSUM_VALID;
+	fx->flags |= FIXED_FNODE_BLOCK_CHECKSUM_VALID | FIXED_FNODE_BLOCK_TYPE;
 	fx->checksum = 0;	/* legacy XOR field, vestigial */
 	spadfs_meta_seal(fx);	/* trailer_crc sits at 508 (Phase 2.2 Cat 2) */
 	if (__unlikely(write_buffer(blk, 1, fx))) return NULL;

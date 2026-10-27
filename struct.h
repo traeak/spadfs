@@ -708,6 +708,19 @@ struct fnode_block {
 #define FIXED_FNODE_BLOCK_MAGIC		0x4E465846
 #define FIXED_FNODE_BLOCK_CHECKSUM_VALID FNODE_BLOCK_CHECKSUM_VALID
 
+/*
+ * Marks a fixed_fnode_block, which carries the 512-byte CRC trailer rather
+ * than the legacy XOR fold.
+ *
+ * Needed because the checksum helper receives a struct fnode_block * through
+ * ~20 generic call sites and cannot infer the type from the magic: under
+ * dynamic_magic the stored magic is XOR-folded with the sector number, so
+ * recovering the base magic requires the sector -- which the checksum
+ * function does not have.
+ */
+#define FNODE_BLOCK_FIXED_TYPE		0x08
+#define FIXED_FNODE_BLOCK_TYPE		FNODE_BLOCK_FIXED_TYPE
+
 struct fixed_fnode_block {
 	__u32 magic;
 	/*

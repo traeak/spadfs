@@ -610,7 +610,7 @@ static void write_root_fixed_fnode(void)
 #define fn	((struct fnode *)fx->fnode0)
 	zerobuf();
 	CPU2SPAD32_LV(&fx->magic, magic(root_fnode_sector, FIXED_FNODE_BLOCK_MAGIC));
-	fx->flags = FIXED_FNODE_BLOCK_CHECKSUM_VALID;
+	fx->flags = FIXED_FNODE_BLOCK_CHECKSUM_VALID | FNODE_BLOCK_FIXED_TYPE;
 	CPU2SPAD16_LV(&fx->cc, 0);
 	CPU2SPAD32_LV(&fx->txc, 0);
 	CPU2SPAD64_LV(&fx->nlink0, 1);
