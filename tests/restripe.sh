@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# Task 2.5 — Prove the 32-bit CRC actually buys detection.
+#
+# WHY THIS EXISTS
+#
+# The Phase 0 baseline (tests/BASELINE-checksum-detection.md) could not
+# attribute anything. Its own header says so: the two columns came out the same
+# because fsck validates checksums regardless of how the volume was created,
+# and word_swap / xor_cancel were DETECTED on every target despite
+# xor_delta == 0x00 -- i.e. caught by magic, field-range and cross-reference
+# checks, NOT by the checksum.
+#
+# So "fsck detects more now" was never evidence that the CRC layer does work.
+# This is the experiment that settles it.
+#
+# METHOD
+#
+# For each (target, class) run the corruption twice:
+#
+#   normal     corrupt the payload, leave the checksum stale
+#   restriped  corrupt the payload, then RECOMPUTE the checksum so it matches
+#              the corrupted bytes
+#
+# A restriped unit passes its own checksum by construction. Therefore any
+# detection that survives restriping is purely structural, and any detection
+# that DISAPPEARS under restriping was carried by the checksum alone.
+#
+#   normal=DETECTED  restriped=DETECTED  -> structural only, CRC contributed nothing
+#   normal=DETECTED  restriped=MISSED    -> CRC is the ONLY thing catching it
+#   normal=MISSED    restriped=MISSED    -> nothing catches it
+#   normal=MISSED    restriped=DETECTED  -> inverted, harness bug, flagged
+#
+# The second row is the number that matters. If it is zero across the board,
+# the entire Phase 2 checksum upgrade is decoration and the structural layer
+# was always doing the work.
+#
+# PROTECTION PER TARGET (read off the verify call sites, not guessed)
+#
+#   superblock, txblock, root_fnode  crc32c trailer   scksuper.c:220/369, sckfxfn.c:76
+#   cct, cct_live                  side CRC region   sckcct.c:158
+#   root_dir                       legacy __byte_sum  sckdir.c:322  (Cat 2 blocker:
+#                                                   fnode_block cannot take a trailer)
+#   apage_index                    NONE              no checksum call site exists
+#
+# apage_index cannot be isolated -- with no checksum there is nothing to
+# restripe, so normal and restriped are identical by construction. Reported as
+# such rather than silently folded into the counts.
+#
+# Runs without root. Output is markdown; redirect to
+# tests/BASELINE-restripe-attribution.md.
+
+set -uo pipefail
+
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+. "$TESTS_DIR/fixtures.sh"
+
+require_tools
+
+SIZE="${TEST_IMAGE_SIZE:-16M}"
+TARGETS=(superblock txblock root_fnode root_dir cct cct_live apage_index)
+CLASSES=(bitflip byte_transpose word_swap word_dup block_copy xor_cancel zero_out)
+
+# Targets whose restripe is a no-op because nothing protects them.
+UNPROTECTED=(apage_index)
+
+is_unprotected() {
+	local t
+	for t in "${UNPROTECTED[@]}"; do [ "$1" = "$t" ] && return 0; done
+	return 1
+}
+
+BASE=""
+make_base() {
+	[ -n "$BASE" ] && return 0
+	BASE="$WORKDIR/rs-base.img"
+	make_image "$BASE" "$SIZE" "--checksums" || die "base image failed"
+	# Prime so the cct has real contents; on a fresh volume it is all zeros
+	# and every cct class is a no-op. Output MUST go to stderr -- it used to
+	# land on stdout and get glued onto a returned path, corrupting a whole
+	# baseline (see the note in detect.sh).
+	python3 "$TESTS_DIR/prime.py" "$BASE" --cc 4 --base-txc 1388 >&2 \
+		|| die "priming failed"
+	check_clean "$BASE" -n || die "primed base is not clean"
+}
+
+# run_case <target> <class> <restripe:0|1> -> DETECTED | MISSED | NOOP | ERROR
+run_case() {
+	local target="$1" cls="$2" rs="$3"
+	local img="$WORKDIR/case.img" rc=0
+	make_base
+	cp -f "$BASE" "$img" || { printf 'ERROR'; return 0; }
+
+	local args=("$img" "$target" "$cls")
+	[ "$rs" = "1" ] && args+=(--restripe)
+
+	python3 "$TESTS_DIR/corrupt.py" "${args[@]}" >/dev/null 2>&1 || rc=$?
+	if [ "$rc" -eq 3 ]; then printf 'NOOP'; return 0
+	elif [ "$rc" -ne 0 ]; then printf 'ERROR'; return 0; fi
+
+	if "$FSCK" -n -f "$img" >/dev/null 2>&1; then
+		printf 'MISSED'
+	else
+		printf 'DETECTED'
+	fi
+}
+
+classify() {
+	local n="$1" r="$2" prot="$3"
+	if [ "$n" = "NOOP" ] || [ "$r" = "NOOP" ]; then printf 'n/a'; return; fi
+	if [ "$n" = "ERROR" ] || [ "$r" = "ERROR" ]; then printf 'harness error'; return; fi
+	if [ "$prot" = "none" ]; then printf 'no checksum to isolate'; return; fi
+	case "$n/$r" in
+		DETECTED/DETECTED) printf 'structural only' ;;
+		DETECTED/MISSED)   printf 'CRC ONLY' ;;
+		MISSED/MISSED)     printf 'undetected' ;;
+		MISSED/DETECTED)   printf 'INVERTED (harness bug)' ;;
+	esac
+}
+
+protection_of() {
+	case "$1" in
+		superblock|txblock|root_fnode) printf 'crc32c trailer' ;;
+		cct|cct_live)                  printf 'side CRC region' ;;
+		root_dir)                    printf 'legacy __byte_sum' ;;
+		*)                           printf 'none' ;;
+	esac
+}
+
+printf '# Restripe attribution: what the checksum layer actually catches\n\n'
+printf 'Generated by `tests/restripe.sh` against this tree. Do not hand-edit.\n\n'
+printf 'Detector: `spadfsck -n -f`. Each case run twice -- once with the\n'
+printf 'checksum left stale, once re-striped to match the corrupted payload.\n'
+printf 'A restriped unit satisfies its own checksum by construction, so any\n'
+printf 'detection that survives restriping is purely structural.\n\n'
+printf '| Target | Class | Protection | Normal | Restriped | Attribution |\n'
+printf '|---|---|---|---|---|---|\n'
+
+crc_only=0
+structural_only=0
+undetected=0
+na=0
+inverted=0
+total=0
+
+for target in "${TARGETS[@]}"; do
+	prot="$(protection_of "$target")"
+	for cls in "${CLASSES[@]}"; do
+		n="$(run_case "$target" "$cls" 0)"
+		r="$(run_case "$target" "$cls" 1)"
+		a="$(classify "$n" "$r" "$prot")"
+		total=$((total + 1))
+		case "$a" in
+			"CRC ONLY")              crc_only=$((crc_only + 1)) ;;
+			"structural only")       structural_only=$((structural_only + 1)) ;;
+			"undetected")            undetected=$((undetected + 1)) ;;
+			"INVERTED (harness bug)") inverted=$((inverted + 1)) ;;
+			*)                       na=$((na + 1)) ;;
+		esac
+		printf '| %s | %s | %s | %s | %s | %s |\n' \
+			"$target" "$cls" "$prot" "$n" "$r" "$a"
+	done
+done
+
+printf '\n## Summary\n\n'
+printf -- '- cases attempted: %d\n' "$total"
+printf -- '- **caught by the checksum and nothing else (CRC ONLY): %d**\n' "$crc_only"
+printf -- '- caught structurally even with the checksum satisfied: %d\n' "$structural_only"
+printf -- '- missed in both modes: %d\n' "$undetected"
+printf -- '- not isolable (no checksum on target) / no-op / error: %d\n' "$na"
+
+printf '\n## Verdict\n\n'
+if [ "$inverted" -gt 0 ]; then
+	printf '**Harness bug: %d case(s) detected only AFTER restriping, which cannot\n' "$inverted"
+	printf 'happen if restripe works.** Investigate before trusting any of this.\n'
+elif [ "$crc_only" -eq 0 ]; then
+	printf '**The CRC layer contributes nothing measurable.** Every class that is\n'
+	printf 'caught at all is caught by structural checks even when the checksum is\n'
+	printf 'satisfied to match the corrupted bytes. Phase 2 would be decoration.\n'
+else
+	printf '**The CRC layer is load-bearing in %d of %d isolable cases.** Those are\n' \
+		"$crc_only" "$((total - na))"
+	printf 'corruptions that fsck sees ONLY because the checksum disagrees with the\n'
+	printf 'payload -- structural validation alone misses them entirely. Restriping\n'
+	printf 'is what makes that visible; the pre-Phase-2 baseline could not tell.\n'
+fi
+
+# Non-zero exit if the harness itself is broken, so CI catches a bad experiment
+# rather than reporting a clean run over meaningless numbers.
+[ "$inverted" -gt 0 ] && exit 1
+exit 0

@@ -26,6 +26,107 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sbinfo import SECTOR, SUPERBLOCK_SECTOR, read_super  # noqa: E402
+from prime import crc32c_std, META_COVER, META_CRC_POS  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Restripe
+#
+# Recompute whatever checksum protects a unit so that it MATCHES the corrupted
+# payload. With the checksum satisfied by construction, any detection fsck
+# still performs is purely structural -- which is the only way to attribute a
+# detection to the checksum layer at all.
+#
+# Without this, "fsck detects more" is unattributable. The magic checks,
+# field-range checks and cross-reference checks were already catching most
+# corruption classes before Phase 2 and still would be. The existing baseline
+# says exactly that: word_swap and xor_cancel were DETECTED on every target
+# despite xor_delta == 0x00, i.e. caught structurally, not by the checksum.
+#
+# So the measurement is per (target, class):
+#   normal    = corrupt payload, leave checksum stale
+#   restriped = corrupt payload, then fix the checksum to match
+#   checksum contribution = detected(normal) and NOT detected(restriped)
+#
+# Which protection each target carries was read off the verify call sites, not
+# guessed:
+#   trailer (crc32c)  scksuper.c:220/369/420, sckfxfn.c:76, sckfile.c:49
+#   cct side CRC      sckcct.c:158 (region written by mkspadfs, sealed per unit)
+#   legacy __byte_sum sckdir.c:322 (fnode_block -- not converted, Cat 2 blocker)
+#   NONE              apage_index -- no checksum call site exists for it at all
+# ---------------------------------------------------------------------------
+
+TRAILER_TARGETS = {"superblock", "txblock", "root_fnode"}
+CCT_SIDE_TARGETS = {"cct", "cct_live"}
+XOR_TARGETS = {"root_dir"}
+UNPROTECTED_TARGETS = {"apage_index"}
+
+CHECKSUM_BASE = ord("C")          # struct.h:29
+FNODE_CHECKSUM_OFF = 5            # magic(4) + flags(1)
+CCT_CRC_PER_UNIT = META_COVER // 4    # 127, mirrors struct.h
+CCT_SECTORS = 512
+
+
+def byte_sum(u, length):
+    """Replicate __byte_sum (struct.h:976) exactly.
+
+    XOR of 8-byte words, then folded to 8 bits. The C writes `>> 31 >> 1`
+    rather than `>> 32` on unsigned long; mirrored here rather than simplified,
+    because a "cleaner" equivalent is exactly the kind of change that quietly
+    stops matching the kernel.
+    """
+    total = 0
+    for off in range(0, length, 8):
+        total ^= int.from_bytes(u[off:off + 8], "little")
+    total &= 0xFFFFFFFFFFFFFFFF
+    total ^= (total >> 31) >> 1
+    total ^= total >> 16
+    total ^= total >> 8
+    return total & 0xFF
+
+
+def restripe_trailer(u):
+    """Re-seal a standard 512-byte trailer: crc32c over bytes 0..507."""
+    u[META_CRC_POS:META_CRC_POS + 4] = (
+        crc32c_std(bytes(u[:META_COVER])) & 0xFFFFFFFF).to_bytes(4, "little")
+
+
+def restripe_xor_fnode_block(u):
+    """Apply the XOR update trick so __byte_sum(block,512) == CHECKSUM_BASE.
+
+    Same identity the tree relies on at sckdir.c:1034: folding the old
+    checksum out and the new one in lands the total on CHECKSUM_BASE.
+    """
+    u[FNODE_CHECKSUM_OFF] ^= CHECKSUM_BASE ^ byte_sum(u, 512)
+    u[FNODE_CHECKSUM_OFF] &= 0xFF
+    if byte_sum(u, 512) != CHECKSUM_BASE:
+        raise AssertionError("xor restripe failed to satisfy the fnode_block invariant")
+
+
+def restripe_cct_side(f, info, cct_sector):
+    """Repoint the side CRC for one cct sector at the corrupted bytes.
+
+    The cct carries no trailer of its own (Phase 2.3 option A), so restriping
+    it means rewriting the CRC slot in the side region AND re-sealing that
+    CRC unit -- otherwise the unit trailer goes stale and fsck fails the unit
+    rather than the sector, which would be detected for the wrong reason.
+    """
+    u = cct_sector // CCT_CRC_PER_UNIT
+    slot = cct_sector % CCT_CRC_PER_UNIT
+    crc_abs = info["cct_crc"] + u
+    f.seek(crc_abs * SECTOR)
+    unit = bytearray(f.read(SECTOR))
+    if len(unit) < SECTOR:
+        raise IOError("short read of cct crc unit")
+
+    f.seek(cct_sector * SECTOR)   # already-corrupted cct sector, as written
+    data = f.read(SECTOR)
+
+    unit[slot * 4:slot * 4 + 4] = (
+        crc32c_std(data) & 0xFFFFFFFF).to_bytes(4, "little")
+    restripe_trailer(unit)
+    f.seek(crc_abs * SECTOR)
+    f.write(unit)
+
 
 # Offsets inside a 512-byte unit are chosen relative to the first "live" region
 # (see find_live_base) so corruptions land on real structure fields rather than
@@ -142,19 +243,37 @@ def target_offset(path, info, target):
 
 
 def main():
-    if len(sys.argv) not in (4, 6):
-        sys.exit("usage: corrupt.py <image> <target> <class> [--at <byte_off>]")
-    path, target, cls = sys.argv[1], sys.argv[2], sys.argv[3]
+    argv = sys.argv[1:]
+    if len(argv) < 3:
+        sys.exit("usage: corrupt.py <image> <target> <class> "
+                "[--at <byte_off>] [--restripe]")
+    path, target, cls = argv[0], argv[1], argv[2]
     pinned = None
-    if len(sys.argv) == 6:
-        if sys.argv[4] != "--at":
-            sys.exit(f"corrupt.py: unknown option {sys.argv[4]}")
-        pinned = int(sys.argv[5])
+    restripe = False
+
+    i = 3
+    while i < len(argv):
+        if argv[i] == "--at":
+            if i + 1 >= len(argv):
+                sys.exit("corrupt.py: --at needs a value")
+            pinned = int(argv[i + 1])
+            i += 2
+        elif argv[i] == "--restripe":
+            restripe = True
+            i += 1
+        else:
+            sys.exit(f"corrupt.py: unknown option {argv[i]}")
 
     info = read_super(path)
     base_sector, extent, anchor = target_region(path, info, target)
     if pinned is not None:
         anchor = pinned
+
+    if restripe and target in UNPROTECTED_TARGETS:
+        # Nothing to restripe: this structure has no checksum in this format.
+        # Reported explicitly rather than silently treated as "restriped",
+        # because a no-op here would otherwise look like a measurement.
+        print("restripe: no-op, target has NO checksum protection")
 
     # Search within the structure's real extent only. Its leading units can be
     # all-zero (e.g. the unused tail of the crash-count table), so look for a
@@ -177,8 +296,27 @@ def main():
             if bytes(unit_bytes) != before:
                 f.seek(off)
                 f.write(unit_bytes)
+
+                if restripe:
+                    if target in TRAILER_TARGETS:
+                        # Re-seal the unit we just wrote.
+                        f.seek(off)
+                        cur = bytearray(f.read(SECTOR))
+                        restripe_trailer(cur)
+                        f.seek(off)
+                        f.write(cur)
+                    elif target in XOR_TARGETS:
+                        f.seek(off)
+                        cur = bytearray(f.read(SECTOR))
+                        restripe_xor_fnode_block(cur)
+                        f.seek(off)
+                        f.write(cur)
+                    elif target in CCT_SIDE_TARGETS:
+                        restripe_cct_side(f, info, base_sector + unit)
+
                 print(f"changed at {target}/{cls} byte={off + anchor if anchor is not None else off} "
-                      f"sector={base_sector + unit} unit={unit}/{extent}")
+                      f"sector={base_sector + unit} unit={unit}/{extent}"
+                      f"{' RESTIPED' if restripe else ''}")
                 return 0
         print("noop")
         return 3
