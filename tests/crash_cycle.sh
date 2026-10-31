@@ -29,6 +29,10 @@
 
 set -uo pipefail
 
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$TESTS_DIR/lib_crash_attr.sh"
+
 DEV=${DEV:-/dev/sda1}
 MNT=${MNT:-/mnt/spadcrash}
 NFILES=${NFILES:-40}
@@ -124,11 +128,21 @@ if [ "$REBOOT" -eq 0 ]; then
 fi
 
 log "triggering hard reboot via sysrq -- dirty pages lost, no unmount"
-# echo 1 first so sysrq is enabled at all on kernels that gate it.
-echo 1 >/proc/sys/kernel/sysrq 2>/dev/null
+
+# The marker-before-trigger ordering is baked into planned_reboot so it can be
+# tested without rebooting anything (I7). If the marker cannot be made
+# durable, the trigger is never touched and we do not reboot.
+#
+# SYSRQ_TRIGGER is injectable; in production it is /proc/sysrq-trigger.
+SYSRQ_TRIGGER=${SYSRQ_TRIGGER:-/proc/sysrq-trigger}
+
 sync 2>/dev/null || true
-# 'b' = immediate reboot, equivalent to pulling the plug.
-echo b >/proc/sysrq-trigger
+if ! planned_reboot "$CYCLE_DIR" "$CYCLE" "$DEV" "$SYSRQ_TRIGGER"; then
+	log "ABORT: no durable PLANNED marker -- NOT rebooting"
+	log "the filesystem is left mounted; fix $CYCLE_DIR and re-run"
+	exit 1
+fi
+log "PLANNED marker fsynced (cycle $CYCLE on $DEV); trigger pulled"
 
 # If we get here the reboot did not happen.
 log "sysrq-trigger returned without rebooting -- aborting, state left mounted"

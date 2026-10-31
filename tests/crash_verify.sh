@@ -25,6 +25,10 @@ set -uo pipefail
 STATE_DIR=${STATE_DIR:-/var/lib/spadfs-crash}
 SPADFSCK=${SPADFSCK:-./spadfsck2}
 MOUNT_TYPE=${MOUNT_TYPE:-spadfs2}
+# Injected so the wiring in this file — not just the library — can be tested
+# without root, a device, or a mounted filesystem (I5).
+MOUNT=${MOUNT:-mount}
+UMOUNT=${UMOUNT:-umount}
 REPAIR=0
 DEV=${DEV:-}
 MNT=${MNT:-}
@@ -48,7 +52,12 @@ if [ -z "$DEV" ] || [ -z "$MNT" ]; then
 	fi
 fi
 
-NEXT_FILE=$STATE_DIR/next_cycle
+TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$TESTS_DIR/lib_crash_attr.sh"
+# shellcheck disable=SC1091
+. "$TESTS_DIR/crash_pstore.sh"
+
 CYCLE=$(cat "$STATE_DIR/cycle" 2>/dev/null || echo 0)
 MANIFEST=$STATE_DIR/manifest.$CYCLE
 OUT=$STATE_DIR/verify.$CYCLE.log
@@ -69,6 +78,42 @@ fi
 
 EXPECTED=$(wc -l <"$MANIFEST")
 echo "expected $EXPECTED fsync-acknowledged files"
+echo
+
+# ------------------------------------------------- 0. reboot attribution ---
+# Runs BEFORE fsck and before any mount. If we cannot say what happened to the
+# machine, nothing below can be trusted: a "clean" result from an unattributed
+# reboot is not evidence of anything.
+echo "--- reboot attribution ---"
+ATTR=$(planned_matches "$STATE_DIR" "$CYCLE")
+if [ "$ATTR" = "planned" ]; then
+	echo "marker   : PLANNED for cycle $CYCLE (harness-requested reboot)"
+	planned_read "$STATE_DIR" | sed 's/^/           /'
+else
+	echo "marker   : none matching cycle $CYCLE"
+	echo "           this reboot was NOT requested by the harness"
+fi
+
+MEM_ADDR=$(boot_env_get "$STATE_DIR" MEM_ADDR)
+MEM_SIZE=$(boot_env_get "$STATE_DIR" MEM_SIZE)
+if [ -n "$MEM_ADDR" ] && ramoops_ensure "$MEM_ADDR" "$MEM_SIZE"; then
+	CAPTURE=live
+else
+	CAPTURE=absent
+	echo "capture  : NOT LIVE -- absence of a panic record proves nothing here"
+fi
+
+PSTORE_CLASS=$(pstore_harvest "${PSTORE_DIR:-/sys/fs/pstore}" "$STATE_DIR" "$CYCLE")
+echo "pstore   : $PSTORE_CLASS (capture=$CAPTURE)"
+if [ -f "$STATE_DIR/panic.$CYCLE.0.txt" ]; then
+	echo "--- first 30 lines of the captured record ---"
+	head -30 "$STATE_DIR/panic.$CYCLE.0.txt"
+	echo "---"
+fi
+ATTR_V=$(reboot_verdict "$ATTR" "$PSTORE_CLASS" "$CAPTURE")
+echo "ATTRIBUTION: $ATTR_V"
+# Consume the marker so a leftover can never vouch for a later cycle.
+planned_consume "$STATE_DIR"
 echo
 
 # ---------------------------------------------------------------- 1. fsck ---
@@ -98,7 +143,7 @@ echo
 echo "--- mount attempt ---"
 mkdir -p "$MNT"
 MOUNTED=1
-if ! mount -t "$MOUNT_TYPE" "$DEV" "$MNT" 2>&1; then
+if ! "$MOUNT" -t "$MOUNT_TYPE" "$DEV" "$MNT" 2>&1; then
 	echo "MOUNT FAILED"
 	MOUNTED=0
 else
@@ -165,28 +210,40 @@ fi
 
 # ----------------------------------------------------------- 5. verdict ----
 echo "==================== verdict: cycle $CYCLE ===================="
-VERDICT=PASS
+OTHER_VERDICT=PASS
 [ $FSCK_RC -ne 0 ] && {
 	echo "FAIL: fsck reported errors (rc=$FSCK_RC)"
-	VERDICT=FAIL
+	OTHER_VERDICT=FAIL
 }
 [ $CCT_CRC_BAD -ne 0 ] && {
 	echo "FAIL: cct CRC unit mismatch after crash -- write ordering has a hole"
-	VERDICT=FAIL
+	OTHER_VERDICT=FAIL
 }
 [ $BACKUP_BAD -ne 0 ] && {
 	echo "FAIL: backup mirror damaged by the crash"
-	VERDICT=FAIL
+	OTHER_VERDICT=FAIL
 }
 [ -n "$GHOST" ] && {
 	echo "FAIL: ghost files present"
-	VERDICT=FAIL
+	OTHER_VERDICT=FAIL
 }
 if [ "$SURVIVED" -lt "$EXPECTED" ]; then
 	echo "NOTE: $((EXPECTED - SURVIVED)) fsync-acknowledged file(s) lost."
 	echo "      fsync returned before the crash, so these SHOULD have survived."
 	echo "      This is a durability violation even if the fs is otherwise consistent."
-	VERDICT="FAIL(durability)"
+	OTHER_VERDICT="FAIL(durability)"
+fi
+
+# Attribution gates everything above. A filesystem that fsck calls clean is
+# worthless if we cannot say what happened to the machine that was writing to
+# it -- and "we captured nothing" must never be reported as a pass.
+VERDICT=$(verify_verdict "$ATTR_V" "$OTHER_VERDICT")
+if [ "$VERDICT" != "$OTHER_VERDICT" ]; then
+	echo "NOTE: attribution ($ATTR_V) overrides the checks above."
+fi
+if [ "$CAPTURE" = "absent" ]; then
+	echo "CAVEAT: the panic capture path was not live for this cycle."
+	echo "        'no panic record' is NOT evidence that nothing crashed."
 fi
 echo "VERDICT: $VERDICT"
 echo
@@ -196,7 +253,7 @@ echo "full log: $OUT"
 if [ "$REPAIR" -eq 1 ]; then
 	echo
 	echo "--- repair pass (destructive) ---"
-	[ "$MOUNTED" -eq 1 ] && umount "$MNT"
+	[ "$MOUNTED" -eq 1 ] && "$UMOUNT" "$MNT"
 	"$SPADFSCK" -p "$DEV" 2>&1 | tail -20
 	echo "repair rc: $?"
 fi
