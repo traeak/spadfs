@@ -338,11 +338,11 @@ static int spadfs_create(
 			 struct mnt_idmap *ns,
 #endif
 			 struct inode *dir, struct dentry *dentry,
-			 mode_type mode,
+			 mode_type mode
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
-			 struct nameidata *nd
-#else
-			 bool excl
+			 , struct nameidata *nd
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(7,3,0)
+			 , bool excl
 #endif
 			 )
 {
