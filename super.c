@@ -1542,27 +1542,72 @@ read_again:
 	/*
 	 * In-RAM mirror of the cct side CRCs (Phase 2.3, option A5).
 	 *
-	 * Computed from fs->cct, NOT read back from disk, and never verified
-	 * here. The kernel's only job with this table is to keep it in step with
-	 * the cct it just wrote; verification is fsck's, offline.
+	 * Seeded from the CRC units ON DISK, not computed from fs->cct. Every
+	 * commit rewrites whole CRC blocks from this table (spadfs_write_cct_crc),
+	 * and with 4K blocks one block holds all five units. Computing the table
+	 * from the cct we just read therefore re-blessed every cct sector on the
+	 * first commit: a rotted sector got a fresh matching CRC and fsck could
+	 * no longer see it. Seeded from disk, a commit changes only the CRCs of
+	 * the cct sectors it actually wrote; every other sector keeps the CRC
+	 * fsck will check it against.
 	 *
-	 * Mount-time verification was implemented and then rejected. The cct is
-	 * written on every commit (spadfs_commit_unlocked), so checking its CRC
-	 * at mount would turn an ordinary crash between the cct write and the
-	 * CRC write into an unmountable volume -- trading a rare bit-rot class
-	 * for a common availability cliff. The cct's own cc/txc handshake
-	 * already handles crash tolerance; a CRC cannot improve on that without
-	 * dual-copying the region.
+	 * Still never fatal. Mount-time verification was implemented and then
+	 * rejected: the cct is written on every commit, so failing the mount on
+	 * a mismatch would turn an ordinary crash between the cct write and the
+	 * CRC write into an unmountable volume. A mismatch is only reported;
+	 * fsck owns verification and repair.
+	 *
+	 * A unit whose own trailer fails (or cannot be read) carries no usable
+	 * CRCs, the same rule fsck applies. Its sectors fall back to CRCs
+	 * computed from fs->cct, as before, and the next commit rewrites it
+	 * sealed.
+	 *
+	 * Residual gap: each commit rewrites the cct sector holding fs->cc from
+	 * RAM, so rot inside that one sector is still re-blessed. Only a check
+	 * at mount can catch that; the warning below is that check.
 	 */
 	if (unlikely(!(fs->cct_crc = spadfs_alloc(1, CCT_SECTORS * sizeof(__u32), 0)))) {
 		r = -ENOMEM;
 		goto err3;
 	}
 	{
-		unsigned s;
+		unsigned s, u, i;
+		unsigned bad_units = 0, mismatched = 0;
 
 		for (s = 0; s < CCT_SECTORS; s++)
 			fs->cct_crc[s] = spadfs_crc32c_std((u8 *)fs->cct + (s << 9), 512);
+
+		for (u = 0; fs->cct_crc_sec && u < CCT_CRC_UNITS; u++) {
+			const __u8 *unit = spadfs_read_sector(fs,
+					fs->cct_crc_sec + u, &bh,
+					CCT_CRC_UNITS - u, "spadfs_fill_super 3");
+
+			if (unlikely(IS_ERR(unit))) {
+				bad_units++;
+				continue;
+			}
+			if (unlikely(spadfs_meta_verify(unit))) {
+				bad_units++;
+				spadfs_brelse(fs, bh);
+				continue;
+			}
+			for (i = 0; i < CCT_CRC_PER_UNIT; i++) {
+				__u32 stored;
+
+				s = u * CCT_CRC_PER_UNIT + i;
+				if (s >= CCT_SECTORS)
+					break;
+				stored = spadfs_meta_get_crc(unit + i * 4);
+				if (unlikely(stored != fs->cct_crc[s]))
+					mismatched++;
+				fs->cct_crc[s] = stored;
+			}
+			spadfs_brelse(fs, bh);
+		}
+		if (unlikely(bad_units | mismatched))
+			printk(KERN_WARNING "spadfs: crash count table: %u of %u cct sector(s) do not match their CRC, %u of %u CRC unit(s) unusable; running spadfsck is recommended\n",
+			       mismatched, (unsigned)CCT_SECTORS,
+			       bad_units, (unsigned)CCT_CRC_UNITS);
 	}
 
 	fs->n_apages = N_APAGES(fs->size, fs->pagesize_bits, fs->sectors_per_disk_block_bits + 9);
