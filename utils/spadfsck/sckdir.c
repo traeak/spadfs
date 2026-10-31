@@ -999,6 +999,26 @@ void prefetch_dnode(blk_t dnode)
 #undef dnode_val
 #undef dnode_set
 
+/*
+ * Reseal a directory's fnode block after changing its size. The root lives
+ * in a fixed_fnode_block, which carries the CRC trailer; every other
+ * directory lives in a chained fnode_block, which keeps the XOR fold.
+ * Dispatch on the magic, as the kernel reader does (bufstruc.c), or fsck
+ * writes an XOR fold onto the root and the next mount fails with EUCLEAN.
+ */
+static void seal_dir_fnode_block(struct fnode_block *f, blk_t blk)
+{
+	if (SPAD2CPU32_LV(&f->magic) == magic(blk, FIXED_FNODE_BLOCK_MAGIC)) {
+		/* flags and the legacy field first: the trailer covers them */
+		f->checksum = 0;
+		f->flags |= FIXED_FNODE_BLOCK_CHECKSUM_VALID | FIXED_FNODE_BLOCK_TYPE;
+		spadfs_meta_seal(f);
+	} else {
+		f->flags |= FNODE_BLOCK_CHECKSUM_VALID;
+		f->checksum ^= CHECKSUM_BASE ^ __byte_sum(f, FNODE_BLOCK_SIZE);
+	}
+}
+
 static int check_dir_size(SUBDIR *d)
 {
 	struct fnode_block *fnode_block;
@@ -1030,8 +1050,7 @@ static int check_dir_size(SUBDIR *d)
 		if (query(qprefix 0, "FIX?")) {
 			auto_dir_size:
 			CPU2SPAD64_LV(&fnode->size[!cc_valid(fnode->cc, fnode->txc)], d->dir_size);
-			fnode_block->flags |= FNODE_BLOCK_CHECKSUM_VALID;
-			fnode_block->checksum ^= CHECKSUM_BASE ^ __byte_sum(fnode_block, FNODE_BLOCK_SIZE);
+			seal_dir_fnode_block(fnode_block, d->this_fnode);
 			if (__unlikely(write_buffer(d->this_fnode, 1, fnode_block))) goto read_err;
 		}
 	}
@@ -1067,8 +1086,7 @@ int adjust_dir_size(blk_t dir_blk, unsigned dir_offset, int delta)
 	size += delta;
 	CPU2SPAD64_LV(&fnode->size[!cc_valid(fnode->cc, fnode->txc)], size);
 
-	fnode_block->flags |= FNODE_BLOCK_CHECKSUM_VALID;
-	fnode_block->checksum ^= CHECKSUM_BASE ^ __byte_sum(fnode_block, FNODE_BLOCK_SIZE);
+	seal_dir_fnode_block(fnode_block, dir_blk);
 
 	return write_buffer(dir_blk, 1, fnode_block);
 }

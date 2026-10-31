@@ -30,10 +30,13 @@ jobs:
       # it needs matching kernel headers, and the point of this suite is that it
       # verifies format behaviour without loading anything.
       - name: Build mkspadfs and spadfsck
-        run: make mkspadfs spadfsck
+        run: make mkspadfs2 spadfsck2
 
       - name: Round-trip matrix
         run: bash tests/roundtrip.sh
+
+      - name: fsck reseals the root after repairing its size
+        run: bash tests/fsck_reseal.sh
 
       - name: Structured corruption detection baseline
         run: bash tests/detect.sh > baseline.md
