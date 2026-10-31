@@ -245,4 +245,39 @@ assert_eq "I7: durable marker -> proceeds" "0" "$rc"
 assert_eq "I7: trigger received the reboot request" "b" "$(cat "$TRIG" 2>/dev/null)"
 assert_eq "I7: marker is for the right cycle" "2" "$(planned_cycle "$BAD")"
 
+# ------------------------------------------- arming: the one-shot trap ----
+AS="$WORKDIR/arm-state"
+mkdir -p "$AS"
+ARM_CALLS="$WORKDIR/arm.calls"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit 0\n' "$ARM_CALLS" >"$WORKDIR/arm-ok"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$WORKDIR/arm-fail"
+chmod +x "$WORKDIR/arm-ok" "$WORKDIR/arm-fail"
+
+: >"$ARM_CALLS"
+rc=0; GRUB_REBOOT="$WORKDIR/arm-ok" boot_arm "$AS" >/dev/null 2>&1 || rc=$?
+assert_eq "boot_arm refuses without an ENTRY_TITLE" "1" "$rc"
+assert_eq "boot_arm without a title calls nothing" "" "$(cat "$ARM_CALLS")"
+
+boot_env_set "$AS" ENTRY_TITLE "spadfs crash test"
+rc=0; GRUB_REBOOT="$WORKDIR/arm-ok" boot_arm "$AS" >/dev/null 2>&1 || rc=$?
+assert_eq "boot_arm succeeds with a title" "0" "$rc"
+assert_eq "boot_arm passes the title as ONE argument" "spadfs crash test" "$(cat "$ARM_CALLS")"
+rc=0; GRUB_REBOOT="$WORKDIR/arm-fail" boot_arm "$AS" >/dev/null 2>&1 || rc=$?
+assert_eq "boot_arm reports a grub-reboot failure" "1" "$rc"
+
+# ARMED record: per-cycle, durable, consumable
+assert_eq "no ARMED record -> capture absent" "absent" "$(capture_at_crash "$AS" 5)"
+armed_write "$AS" 5
+assert_eq "ARMED for cycle 5 -> capture live for 5" "live" "$(capture_at_crash "$AS" 5)"
+assert_eq "ARMED for cycle 5 does not vouch for 6" "absent" "$(capture_at_crash "$AS" 6)"
+TRACE2="$WORKDIR/armed.trace"
+strace -f -e trace=fsync -o "$TRACE2" \
+	bash -c ". '$TESTS_DIR/lib_crash_attr.sh'; armed_write '$AS' 9" >/dev/null 2>&1
+n=$(grep -c 'fsync(' "$TRACE2" 2>/dev/null)
+[ "${n:-0}" -ge 2 ] && ok "armed_write fsyncs the file and the directory ($n fsyncs)" \
+	|| bad "armed_write fsync count" "saw ${n:-0}, want >= 2"
+armed_consume "$AS"; armed_consume "$AS"
+assert_eq "armed_consume is idempotent and leaves nothing" "no" \
+	"$([ -e "$AS/ARMED" ] && echo yes || echo no)"
+
 summary

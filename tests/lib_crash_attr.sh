@@ -434,3 +434,78 @@ grub_strip_token() {
 		print lead out
 	}'
 }
+
+# ------------------------------------------------------------ arming --
+# THE ONE-SHOT TRAP.
+#
+# grub-reboot arms the test entry for exactly ONE boot, and getting onto the
+# test boot in the first place uses it up. So the reboot that follows a crash
+# cycle -- the harness's own sysrq 'b', or panic=10 after a real panic --
+# lands on the DEFAULT entry, which has no memmap= reservation. There the
+# verifier cannot load ramoops (CAPTURE=absent, so every cycle reads as
+# unverified), and the kernel is free to reuse the 8 MiB that hold the panic
+# record.
+#
+# So every reboot the harness causes or risks is preceded by re-arming. Arm
+# at the START of a cycle, not just before the trigger: a real panic halfway
+# through the writes must come back on the test entry too.
+
+# boot_arm STATE_DIR -- select the test entry for the next boot only.
+# GRUB_REBOOT is injectable for tests.
+boot_arm() {
+	local sd=${1:-} title
+	title=$(boot_env_get "$sd" ENTRY_TITLE)
+	if [ -z "$title" ]; then
+		echo "boot_arm: no ENTRY_TITLE in $sd/boot_env -- run crash_boot_setup.sh --apply" >&2
+		return 1
+	fi
+	if ! "${GRUB_REBOOT:-grub-reboot}" "$title"; then
+		echo "boot_arm: grub-reboot '$title' failed" >&2
+		return 1
+	fi
+	return 0
+}
+
+# armed_write STATE_DIR CYCLE -- durable record that cycle CYCLE ran with the
+# capture path live and the next boot armed. The verifier needs this to know
+# the CRASHED boot was recording: proving ramoops works on the boot doing the
+# verifying says nothing about the boot that died.
+armed_write() {
+	local sd=${1:-} cycle=${2:-} tmp
+	[ -n "$sd" ] && [ -n "$cycle" ] || return 2
+	mkdir -p "$sd" || return 1
+	tmp="$sd/ARMED.tmp.$$"
+	{
+		printf 'cycle=%s\n' "$cycle"
+		printf 'capture=live\n'
+		printf 'ts=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	} >"$tmp" || return 1
+	fsync_file "$tmp" || return 1
+	mv -f "$tmp" "$sd/ARMED" || return 1
+	fsync_dir "$sd" || return 1
+	return 0
+}
+
+# capture_at_crash STATE_DIR CYCLE -- "live" if cycle CYCLE recorded that it
+# ran with capture live, else "absent". Matched on the cycle number, for the
+# same reason as planned_matches: a record from cycle N must not vouch for N+1.
+capture_at_crash() {
+	local sd=${1:-} want=${2:-} cyc cap
+	if [ -f "$sd/ARMED" ]; then
+		cyc=$(sed -n 's/^cycle=//p' "$sd/ARMED" | head -1)
+		cap=$(sed -n 's/^capture=//p' "$sd/ARMED" | head -1)
+		if [ "$cyc" = "$want" ] && [ "$cap" = "live" ]; then
+			printf 'live\n'
+			return 0
+		fi
+	fi
+	printf 'absent\n'
+}
+
+armed_consume() {
+	local sd=${1:-}
+	[ -d "$sd" ] || return 0
+	rm -f "$sd/ARMED" || return 1
+	fsync_dir "$sd" || return 1
+	return 0
+}

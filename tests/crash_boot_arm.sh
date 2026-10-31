@@ -6,6 +6,10 @@
 # cannot persist by accident. The boot after that is your normal entry again.
 #
 # Usage: sudo tests/crash_boot_arm.sh
+#
+# Needed once, to get onto the test boot. After that, crash_cycle.sh --reboot
+# and the self-check's positive control re-arm by themselves before every
+# reboot they cause, because each boot uses the one-shot up.
 
 set -uo pipefail
 
@@ -30,7 +34,8 @@ if [ -f "$GRUBENV" ]; then
 	"$GRUB_EDITENV" "$GRUBENV" list 2>&1 || true
 fi
 
-"$GRUB_REBOOT" "$TITLE" || { echo "grub-reboot failed" >&2; exit 1; }
+# Same helper crash_cycle.sh and the self-check use, so all three arm alike.
+GRUB_REBOOT="$GRUB_REBOOT" boot_arm "$STATE_DIR" || { echo "grub-reboot failed" >&2; exit 1; }
 
 if [ -f "$GRUBENV" ]; then
 	echo "--- grubenv after ---"

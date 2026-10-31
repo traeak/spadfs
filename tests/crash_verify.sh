@@ -94,13 +94,31 @@ else
 	echo "           this reboot was NOT requested by the harness"
 fi
 
+# "No panic record" only means something if BOTH boots did their part:
+#   - the boot that died was recording (crash_cycle.sh's preflight proved it
+#     and left an ARMED record for this cycle), and
+#   - this boot can read the record back (the reservation is in place again,
+#     which needs the re-arm the preflight did).
+# Checking only this boot -- as this used to -- reports "live" for a cycle
+# that ran with nothing recording.
+CRASHED_CAPTURE=$(capture_at_crash "$STATE_DIR" "$CYCLE")
 MEM_ADDR=$(boot_env_get "$STATE_DIR" MEM_ADDR)
 MEM_SIZE=$(boot_env_get "$STATE_DIR" MEM_SIZE)
 if [ -n "$MEM_ADDR" ] && ramoops_ensure "$MEM_ADDR" "$MEM_SIZE"; then
+	READ_CAPTURE=live
+else
+	READ_CAPTURE=absent
+fi
+echo "capture  : crashed boot $CRASHED_CAPTURE, this boot $READ_CAPTURE"
+if [ "$CRASHED_CAPTURE" = live ] && [ "$READ_CAPTURE" = live ]; then
 	CAPTURE=live
 else
 	CAPTURE=absent
-	echo "capture  : NOT LIVE -- absence of a panic record proves nothing here"
+	[ "$CRASHED_CAPTURE" = live ] || \
+		echo "           cycle $CYCLE has no ARMED record: nothing proves the crashed boot was recording"
+	[ "$READ_CAPTURE" = live ] || \
+		echo "           this boot cannot read pstore: not on the armed test entry?"
+	echo "           absence of a panic record proves nothing here"
 fi
 
 PSTORE_CLASS=$(pstore_harvest "${PSTORE_DIR:-/sys/fs/pstore}" "$STATE_DIR" "$CYCLE")
@@ -112,8 +130,9 @@ if [ -f "$STATE_DIR/panic.$CYCLE.0.txt" ]; then
 fi
 ATTR_V=$(reboot_verdict "$ATTR" "$PSTORE_CLASS" "$CAPTURE")
 echo "ATTRIBUTION: $ATTR_V"
-# Consume the marker so a leftover can never vouch for a later cycle.
+# Consume the markers so a leftover can never vouch for a later cycle.
 planned_consume "$STATE_DIR"
+armed_consume "$STATE_DIR"
 echo
 
 # ---------------------------------------------------------------- 1. fsck ---

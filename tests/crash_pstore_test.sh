@@ -274,4 +274,51 @@ pstore_harvest "$I1_PS2" "$I1_SD" 13 >/dev/null 2>&1
 assert_eq "I1: non-dmesg pstore files are left alone" "yes" \
 	"$([ -f "$I1_PS2/console-ramoops-0" ] && echo yes || echo no)"
 
+# ------------------------------------------------ reboot_preflight --------
+# The one-shot trap: the boot that got us onto the test entry used it up, so a
+# cycle must prove capture is live AND re-arm before risking a reboot -- and
+# each failure must stop the later steps.
+PF_REBOOT_CALLS="$WORKDIR/pf-reboot.calls"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit 0\n' "$PF_REBOOT_CALLS" >"$WORKDIR/pf-reboot-ok"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit 1\n' "$PF_REBOOT_CALLS" >"$WORKDIR/pf-reboot-fail"
+chmod +x "$WORKDIR/pf-reboot-ok" "$WORKDIR/pf-reboot-fail"
+
+# run_pf NAME CMDLINE GRUB_REBOOT_STUB [no_env] -> sets pf_rc, pf_sd
+run_pf() {
+	pf_sd="$WORKDIR/pf-$1"
+	rm -rf "$pf_sd"; mkdir -p "$pf_sd"
+	: >"$PF_REBOOT_CALLS"
+	if [ "${4:-}" != no_env ]; then
+		boot_env_set "$pf_sd" MEM_ADDR 0x103e000000
+		boot_env_set "$pf_sd" MEM_SIZE 8M
+		boot_env_set "$pf_sd" ENTRY_TITLE "spadfs crash test"
+	fi
+	pf_rc=0
+	CMDLINE="$2" MODPROBE="$WORKDIR/stub-modprobe" DMESG="$WORKDIR/stub-dmesg" \
+		FINDMNT="$WORKDIR/stub-findmnt" SYS_MODULE_DIR="$MOD_OK" IOMEM="$IOMEM_RES" \
+		GRUB_REBOOT="$3" reboot_preflight "$pf_sd" 7 >/dev/null 2>&1 || pf_rc=$?
+}
+stub_modprobe 0
+stub_findmnt 0
+
+run_pf good "$CMD_RESERVED" "$WORKDIR/pf-reboot-ok"
+assert_eq "preflight: passes on a live, armable test boot" "0" "$pf_rc"
+assert_eq "preflight: re-arms the test entry by its title" "spadfs crash test" \
+	"$(cat "$PF_REBOOT_CALLS")"
+assert_eq "preflight: records ARMED for this cycle" "live" "$(capture_at_crash "$pf_sd" 7)"
+
+run_pf noenv "$CMD_RESERVED" "$WORKDIR/pf-reboot-ok" no_env
+assert_eq "preflight: refuses without boot_env" "1" "$pf_rc"
+assert_eq "preflight: no boot_env -> nothing armed" "" "$(cat "$PF_REBOOT_CALLS")"
+
+# Not on the test boot: the reservation is missing, so capture is not live.
+run_pf bare "$CMD_BARE" "$WORKDIR/pf-reboot-ok"
+assert_eq "preflight: refuses when capture is not live" "1" "$pf_rc"
+assert_eq "preflight: capture not live -> next boot NOT armed" "" "$(cat "$PF_REBOOT_CALLS")"
+assert_eq "preflight: capture not live -> no ARMED record" "absent" "$(capture_at_crash "$pf_sd" 7)"
+
+run_pf armfail "$CMD_RESERVED" "$WORKDIR/pf-reboot-fail"
+assert_eq "preflight: refuses when arming fails" "1" "$pf_rc"
+assert_eq "preflight: arming failed -> no ARMED record" "absent" "$(capture_at_crash "$pf_sd" 7)"
+
 summary

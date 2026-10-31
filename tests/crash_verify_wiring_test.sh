@@ -69,6 +69,11 @@ mkdir -p "$FIX/mods/ramoops" "$FIX/mods_empty"
 
 # ---- one scenario ------------------------------------------------------
 # scenario CYCLE MAKE_PLANNED CAPTURE [RECORD]
+# CAPTURE is which boots did their part:
+#   live       crashed boot ARMED for this cycle AND this boot can read pstore
+#   read_only  this boot can read, but no ARMED record (cycle ran unarmed)
+#   armed_only ARMED record, but this boot cannot read (landed on default)
+#   absent     neither
 # RECORD=panic drops a dmesg-ramoops record into the fake pstore dir.
 # Prints the final VERDICT value.
 scenario() {
@@ -90,6 +95,11 @@ scenario() {
 	# boot_env is what tells the verifier which region to look for.
 	bash -c ". '$TESTS_DIR/lib_crash_attr.sh'; boot_env_set '$sd' MEM_ADDR 0x103e000000; boot_env_set '$sd' MEM_SIZE 8M"
 
+	case "$capture" in
+	live | armed_only)
+		bash -c ". '$TESTS_DIR/lib_crash_attr.sh'; armed_write '$sd' '$cycle'" ;;
+	esac
+
 	if [ "$make_planned" = yes ]; then
 		bash -c ". '$TESTS_DIR/lib_crash_attr.sh'; planned_write '$sd' '$cycle' /dev/fake"
 	fi
@@ -105,7 +115,7 @@ scenario() {
 		MOUNT_TYPE=faketype PSTORE_DIR="$ps"
 		POPULATE_FROM="$list" CYCLE_FOR_MOUNT="$cycle"
 	)
-	if [ "$capture" = live ]; then
+	if [ "$capture" = live ] || [ "$capture" = read_only ]; then
 		cmd_env+=(
 			CMDLINE="$FIX/cmd_reserved" IOMEM="$FIX/iomem_reserved"
 			MODPROBE="$FIX/modprobe_ok" DMESG="$FIX/dmesg"
@@ -140,5 +150,23 @@ assert_eq "I2: planned + none + capture DEAD is not PASS" "FAIL(attribution-unve
 	"$(scenario 24 yes absent)"
 assert_eq "I2: unplanned + none + capture dead still no-evidence" "FAIL(attribution)" \
 	"$(scenario 25 no absent)"
+
+# ---- I8: capture must be proven on BOTH boots ----------------------------
+# This boot can read pstore, but the crashed boot left no ARMED record: the
+# old verifier called this live and passed it.
+assert_eq "I8: planned + none + readable but never armed is not PASS" \
+	"FAIL(attribution-unverified)" "$(scenario 26 yes read_only)"
+# Armed, but the reboot landed where pstore cannot be read (the one-shot trap).
+assert_eq "I8: planned + none + armed but unreadable is not PASS" \
+	"FAIL(attribution-unverified)" "$(scenario 27 yes armed_only)"
+# An ARMED record from another cycle must not vouch for this one.
+sd28="$FIX/state_28"
+mkdir -p "$sd28"
+bash -c ". '$TESTS_DIR/lib_crash_attr.sh'; armed_write '$sd28' 99"
+assert_eq "I8: an ARMED record for another cycle does not count" \
+	"FAIL(attribution-unverified)" "$(scenario 28 yes read_only)"
+# and the verifier consumes it, so it cannot vouch next time either
+[ ! -e "$FIX/state_20/ARMED" ] && ok "I8: verify consumes the ARMED record" \
+	|| bad "I8: ARMED record left behind after verify"
 
 summary

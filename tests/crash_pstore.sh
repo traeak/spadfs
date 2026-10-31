@@ -174,3 +174,43 @@ ramoops_ensure() {
 	echo "ramoops_ensure: OK — capture path live ($mem_addr, $bytes bytes, record $rec_bytes, ecc $ecc)"
 	return 0
 }
+
+# reboot_preflight STATE_DIR CYCLE
+# Everything that must be true BEFORE a crash cycle risks a reboot, in order:
+#
+#   1. the capture path is live on THIS boot (reservation proven, ramoops
+#      loaded, pstore mounted) -- which also proves we are on the test entry
+#   2. the next boot is armed, so the reboot after a planned trigger OR a
+#      real panic lands on the test entry, where the record can be read
+#   3. a durable ARMED record for this cycle, so the verifier can tell the
+#      crashed boot was recording (capture_at_crash)
+#
+# Any failure returns non-zero and the cycle must not start: a reboot we
+# cannot attribute is not a result. Runs before anything is mounted.
+reboot_preflight() {
+	local sd=${1:-} cycle=${2:-} mem_addr mem_size
+
+	[ -n "$sd" ] && [ -n "$cycle" ] || return 2
+	mem_addr=$(boot_env_get "$sd" MEM_ADDR)
+	mem_size=$(boot_env_get "$sd" MEM_SIZE)
+	if [ -z "$mem_addr" ] || [ -z "$mem_size" ]; then
+		echo "preflight: no MEM_ADDR/MEM_SIZE in $sd/boot_env -- run crash_boot_setup.sh --apply" >&2
+		return 1
+	fi
+	if ! ramoops_ensure "$mem_addr" "$mem_size"; then
+		echo "preflight: the panic capture path is not live on this boot." >&2
+		echo "  Boot the test entry first: sudo tests/crash_boot_arm.sh, reboot, then" >&2
+		echo "  sudo tests/crash_attr_selfcheck.sh must pass." >&2
+		return 1
+	fi
+	if ! boot_arm "$sd"; then
+		echo "preflight: could not arm the next boot; a reboot now would land on the" >&2
+		echo "  default entry, where the panic record cannot be read." >&2
+		return 1
+	fi
+	if ! armed_write "$sd" "$cycle"; then
+		echo "preflight: could not write a durable ARMED record to $sd" >&2
+		return 1
+	fi
+	return 0
+}

@@ -77,6 +77,23 @@ control_allowed() {
 	return 0
 }
 
+# control_record_found PSTORE_DIR
+# Did a previous positive control leave its record? Prints the first
+# dmesg-ramoops file containing the sysrq crash line. Read-only: the record
+# is left for crash_verify.sh's harvest, which owns erasing it.
+control_record_found() {
+	local ps=${1:-} f
+	[ -d "$ps" ] || return 1
+	for f in "$ps"/dmesg-ramoops-*; do
+		[ -e "$f" ] || continue
+		if grep -qF 'sysrq: Trigger a crash' "$f" 2>/dev/null; then
+			printf '%s\n' "$f"
+			return 0
+		fi
+	done
+	return 1
+}
+
 # ------------------------------------------------------------- main -------
 main() {
 	local throwaway=0
@@ -118,6 +135,13 @@ main() {
 	report 4 "reserved region is not claimed as System RAM" $? \
 		"grep the region in /proc/iomem; System RAM there means it was never reserved"
 
+	local rec
+	if rec=$(control_record_found "${PSTORE_DIR:-/sys/fs/pstore}"); then
+		echo
+		echo "  POSITIVE CONTROL CONFIRMED: a deliberate panic's record survived"
+		echo "        the reboot: $rec"
+	fi
+
 	echo
 	if [ "$fails" -ne 0 ]; then
 		echo "SELF-CHECK: $fails check(s) FAILED. Do not run crash cycles."
@@ -140,10 +164,20 @@ main() {
 		return 1
 	fi
 
+	# The one-shot was used up getting onto this boot. Without re-arming,
+	# panic=10 reboots into the default entry, which cannot read the record
+	# and is free to overwrite it: the control would "fail" with the capture
+	# path working perfectly.
+	if ! boot_arm "${STATE_DIR:-/var/lib/spadfs-crash}"; then
+		echo "could not re-arm the test entry -- NOT panicking" >&2
+		return 1
+	fi
+
 	echo
 	echo "POSITIVE CONTROL: triggering a deliberate kernel panic in 3 seconds."
-	echo "After the reboot, expect a dmesg-ramoops record containing"
-	echo "'sysrq: Trigger a crash', harvested to panic.<cycle>.0.txt."
+	echo "The test entry is re-armed, so the machine comes back on it. Then run"
+	echo "  sudo $0"
+	echo "and expect 'POSITIVE CONTROL CONFIRMED'."
 	sleep 3
 	echo 1 >/proc/sys/kernel/sysrq 2>/dev/null || true
 	echo c >/proc/sysrq-trigger

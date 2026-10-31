@@ -25,6 +25,13 @@
 # Without --reboot this only prepares state and prints the reboot command, so
 # nothing destructive happens by accident.
 #
+# With --reboot it first runs reboot_preflight (crash_pstore.sh) and refuses
+# to start unless: the panic capture path is live on this boot, the next boot
+# is re-armed onto the test entry, and an ARMED record for this cycle is
+# durable. The one-shot GRUB entry is used up by the boot that got us here,
+# so without re-arming, the reboot after this cycle -- planned or a real
+# panic -- would land on the default entry and nothing could be verified.
+#
 # Post-reboot, run tests/crash_verify.sh.
 
 set -uo pipefail
@@ -32,6 +39,8 @@ set -uo pipefail
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$TESTS_DIR/lib_crash_attr.sh"
+# shellcheck disable=SC1091
+. "$TESTS_DIR/crash_pstore.sh"
 
 DEV=${DEV:-/dev/sda1}
 MNT=${MNT:-/mnt/spadcrash}
@@ -54,7 +63,8 @@ done
 CYCLE_DIR=$STATE_DIR
 mkdir -p "$CYCLE_DIR"
 CYCLE=$(( $(cat "$CYCLE_DIR/cycle" 2>/dev/null || echo 0) + 1 ))
-echo "$CYCLE" >"$CYCLE_DIR/cycle"
+# The counter is written only after the preflight below, so a refused
+# --reboot does not burn a cycle number.
 
 MANIFEST=$CYCLE_DIR/manifest.$CYCLE
 CRASH_LOG=$CYCLE_DIR/crash.$CYCLE.log
@@ -71,6 +81,15 @@ if ! id -u | grep -qx 0; then
 	echo "must run as root" >&2
 	exit 1
 fi
+
+if [ "$REBOOT" -eq 1 ]; then
+	if ! reboot_preflight "$CYCLE_DIR" "$CYCLE"; then
+		echo "REFUSING: crash cycle $CYCLE not started -- see above" >&2
+		exit 1
+	fi
+	echo "[cycle $CYCLE] preflight ok: capture live, next boot armed, ARMED recorded"
+fi
+echo "$CYCLE" >"$CYCLE_DIR/cycle"
 
 log "device=$DEV mnt=$MNT files=$NFILES"
 
