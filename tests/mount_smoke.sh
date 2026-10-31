@@ -56,14 +56,17 @@ banner() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 # ---------------------------------------------------------------------------
 banner "0. module state"
 # ---------------------------------------------------------------------------
-if lsmod | grep -q '^spadfs2 '; then
-	ok "spadfs2 already loaded"
+# Always reload, so this tests the module built in this tree rather than
+# whatever an earlier run left loaded. (The old check, `lsmod | grep -q`,
+# also failed under pipefail when the module WAS loaded: grep -q exits on the
+# first match, lsmod takes SIGPIPE, and insmod then hit "File exists".)
+if [ -e /sys/module/spadfs2 ]; then
+	rmmod spadfs2 || die "spadfs2 is loaded and cannot be unloaded (mounted?)"
+fi
+if insmod "$REPO_ROOT/spadfs2.ko" 2>/dev/null; then
+	ok "insmod spadfs2.ko"
 else
-	if insmod "$REPO_ROOT/spadfs2.ko" 2>/dev/null; then
-		ok "insmod spadfs2.ko"
-	else
-		die "insmod failed: $(dmesg | tail -3)"
-	fi
+	die "insmod failed: $(dmesg | tail -3)"
 fi
 grep -q spadfs2 /proc/filesystems \
 	&& ok "spadfs2 present in /proc/filesystems" \

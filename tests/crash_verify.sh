@@ -137,6 +137,12 @@ echo "$FSCK_OUT" | grep -qE "CCT BACKUP (CRC UNIT .* CHECKSUM MISMATCH|CORRUPT|R
 echo "cct CRC region self-consistent : $([ $CCT_CRC_BAD -eq 0 ] && echo YES || echo NO)"
 echo "cct declared untrustworthy     : $([ $CCT_UNTRUSTWORTHY -eq 0 ] && echo no || echo YES)"
 echo "backup mirror healthy          : $([ $BACKUP_BAD -eq 0 ] && echo YES || echo NO)"
+# Informational, not a failure: the kernel flushes the primary, then the
+# mirror, so a crash between the two leaves the mirror one commit behind
+# (or, on 512-byte blocks, its stamp torn). That commit was never
+# acknowledged; fsck refreshes the mirror. Worth seeing, not worth failing.
+BACKUP_LAG=$(echo "$FSCK_OUT" | grep -oE "CCT BACKUP IS OUT OF DATE.*|CCT BACKUP STAMP DOES NOT MATCH ITS DATA.*" | head -1)
+echo "backup mirror current          : ${BACKUP_LAG:-YES}"
 echo
 
 # ---------------------------------------------------------------- 2. mount --

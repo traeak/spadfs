@@ -38,6 +38,9 @@ jobs:
       - name: fsck reseals the root after repairing its size
         run: bash tests/fsck_reseal.sh
 
+      - name: cct backup recovery matrix (epoch stamp)
+        run: bash tests/cct_recovery.sh
+
       - name: Structured corruption detection baseline
         run: bash tests/detect.sh > baseline.md
 

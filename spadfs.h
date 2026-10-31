@@ -396,6 +396,11 @@ struct __spadfs {
 	sector_t cct_crc_sec;	/* start of the cct side CRC region */
 	__u32 *cct_crc;		/* flat, CCT_SECTORS entries; in-RAM mirror of
 				 * the on-disk units (see struct.h CCT_CRC_*) */
+	sector_t cct_backup_sec;	/* cct mirror (Task 3.3); 0 = none */
+	sector_t cct_backup_crc_sec;	/* its CRC region, stamp in last unit */
+	int cct_verified;	/* cct matched its CRCs at mount */
+	int cct_backup_live;	/* mirror is a full copy of this mount's cct
+				 * and every commit keeps it current */
 	sector_t root_sec;
 	sector_t size;
 	sector_t freespace;

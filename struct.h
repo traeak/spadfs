@@ -134,6 +134,53 @@ struct userblock {
 #define CCT_BACKUP_SECTORS	CCT_SECTORS
 #define CCT_BACKUP_CRC_UNITS	CCT_CRC_UNITS
 
+/*
+ * Backup epoch stamp (Task 3.3).
+ *
+ * A mirror can verify perfectly and still be stale, and restoring a stale one
+ * is silent data reversion: CC_VALID is (s32)(cct[cc] - txc) >= 0, so older
+ * cct values mark newer structures invalid and their older alternates win.
+ * The stamp records which state the mirror is a full copy of, so fsck can
+ * tell "a commit or two behind" (restoring it is a clean rollback, exactly
+ * what a crash does) from "a crash epoch or more behind" (restoring it
+ * reverts data).
+ *
+ *   cc   the crash count the writer was working in
+ *   txc  cct[cc] as written to the mirror (the on-disk value, not the RAM
+ *        value after the next transaction starts)
+ *
+ * It lives in the unused tail of the backup's last CRC unit: units 0..3
+ * cover sectors 0..507, unit 4 covers 508..511, so only its first 4 CRC
+ * slots are used. That space is inside SPADFS_META_COVER, so the unit's own
+ * trailer seals the stamp too -- no new region, sector or write. The primary
+ * CRC region leaves the same slack zero.
+ *
+ * Fields are in volume byte order (CPU2SPAD*), like every on-disk field.
+ * reserved must be zero.
+ *
+ * THE INVARIANT a valid stamp promises, and that every writer must keep:
+ * the mirror is at most the commit in progress behind the primary. The
+ * kernel keeps it by copying the whole cct when it goes read-write and
+ * mirroring every commit after the primary is durable; mkspadfs and
+ * spadfsck keep it by writing an exact copy. A writer that is about to let
+ * the primary move on WITHOUT updating the mirror (the primary failed its
+ * CRCs at mount, or a mirror write failed) must first clear the stamp
+ * (magic = 0). Otherwise a stamp left behind would vouch for a mirror an
+ * unbounded number of acknowledged commits old, and fsck would restore it
+ * unattended.
+ */
+#define CCT_BACKUP_STAMP_MAGIC	0x53544343	/* "CCTS" */
+#define CCT_BACKUP_STAMP_UNIT	(CCT_BACKUP_CRC_UNITS - 1)
+#define CCT_BACKUP_STAMP_OFF	\
+	((CCT_SECTORS - CCT_BACKUP_STAMP_UNIT * CCT_CRC_PER_UNIT) * 4)	/* 16 */
+
+struct cct_backup_stamp {
+	__u32 magic;
+	__u32 cc;
+	__u32 txc;
+	__u32 reserved;
+};
+
 struct superblock {
 	__u8 signature[8];
 
@@ -1022,6 +1069,24 @@ static __finline__ const char *validate_super(struct superblock *super)
 		return "cct invalid";
 	if (unlikely(!validate_range(SPAD2CPU64_LV(&super->size), blockmask, SPAD2CPU64_LV(&super->root), blockmask + 1)))
 		return "root invalid";
+	/*
+	 * The cct CRC region and the backup mirror. Zero means "not present"
+	 * (fsck reports it, the kernel skips it); anything else must be a real,
+	 * block-aligned, in-range region. The kernel rewrites these regions
+	 * whole blocks at a time, so an unaligned pointer zeroes whatever shares
+	 * its first block, and a zero pointer used as an address writes block 0.
+	 * The CRC regions are CCT_CRC_UNITS sectors rounded up to whole blocks,
+	 * which is exactly what mkspadfs and spadfsck reserve.
+	 */
+	if (unlikely(SPAD2CPU64_LV(&super->cct_crc) &&
+		     !validate_range(SPAD2CPU64_LV(&super->size), blockmask, SPAD2CPU64_LV(&super->cct_crc), (CCT_CRC_UNITS + blockmask) & ~(__u64)blockmask)))
+		return "cct_crc invalid";
+	if (unlikely(SPAD2CPU64_LV(&super->cct_backup) &&
+		     !validate_range(SPAD2CPU64_LV(&super->size), blockmask, SPAD2CPU64_LV(&super->cct_backup), CCT_BACKUP_SECTORS)))
+		return "cct_backup invalid";
+	if (unlikely(SPAD2CPU64_LV(&super->cct_backup_crc) &&
+		     !validate_range(SPAD2CPU64_LV(&super->size), blockmask, SPAD2CPU64_LV(&super->cct_backup_crc), (CCT_BACKUP_CRC_UNITS + blockmask) & ~(__u64)blockmask)))
+		return "cct_backup_crc invalid";
 	return (char *)0;
 }
 
@@ -1154,6 +1219,19 @@ _Static_assert(offsetof(struct anode, trailer_crc) == SPADFS_META_CRC_POS,
 		"anode trailer field must sit at the unit trailer position");
 _Static_assert(offsetof(struct fixed_fnode_block, trailer_crc) == SPADFS_META_CRC_POS,
 		"fixed fnode trailer field must sit at the unit trailer position");
+/*
+ * The cct backup stamp must sit after the last CRC slot of its unit and
+ * inside the sealed cover. The draft plan put it at CCT_CRC_PER_UNIT * 4 =
+ * 508, which is the trailer itself.
+ */
+_Static_assert(sizeof(struct cct_backup_stamp) == 16,
+		"cct_backup_stamp layout changed");
+_Static_assert(CCT_BACKUP_STAMP_OFF >=
+		(CCT_SECTORS - CCT_BACKUP_STAMP_UNIT * CCT_CRC_PER_UNIT) * 4,
+		"cct backup stamp overlaps the last unit's CRC slots");
+_Static_assert(CCT_BACKUP_STAMP_OFF + sizeof(struct cct_backup_stamp) <=
+		SPADFS_META_COVER,
+		"cct backup stamp must fit inside the sealed CRC unit cover");
 /*
  * Kept as guards even though fnode blocks are not trailer-covered: if anyone
  * shrinks FNODE_MAX_SIZE again these fire and force the same investigation.

@@ -585,7 +585,7 @@ static void write_txct(__u64 base)
  * sector. That is still recorded explicitly: what matters is that the stored
  * value matches what is on disk, not that it is interesting.
  */
-static void write_cct_crc(__u64 base)
+static void write_cct_crc(__u64 base, int stamped)
 {
 	static __u8 zero_sector[512];
 	__u8 unit[512];
@@ -599,6 +599,18 @@ static void write_cct_crc(__u64 base)
 				break;
 			spadfs_meta_put_crc(unit + i * 4,
 					    spadfs_crc32c_std(zero_sector, 512));
+		}
+		/*
+		 * Task 3.3 epoch stamp (struct.h): the backup is a full copy
+		 * of the cct as of tx.cc = 0, cct[0] = 0.
+		 */
+		if (stamped && u == CCT_BACKUP_STAMP_UNIT) {
+			struct cct_backup_stamp *st = (struct cct_backup_stamp *)
+				(unit + CCT_BACKUP_STAMP_OFF);
+			CPU2SPAD32_LV(&st->magic, CCT_BACKUP_STAMP_MAGIC);
+			CPU2SPAD32_LV(&st->cc, 0);
+			CPU2SPAD32_LV(&st->txc, 0);
+			CPU2SPAD32_LV(&st->reserved, 0);
 		}
 		spadfs_meta_seal(unit);
 		write_blocks(unit, base + u, 1);
@@ -1002,7 +1014,7 @@ int main(int argc, const char * const argv[])
 	/*write_apage_index(apage_index_1_sector);*/
 	fprintf(stderr, "\rwriting crash count table...\n");
 	write_txct(cct_sector);
-	write_cct_crc(cct_crc_sector);
+	write_cct_crc(cct_crc_sector, 0);
 	/*
 	 * Phase 3: the mirror is written from the same zero-filled buffers as the
 	 * primary, so at mkfs the two are byte-identical and both are sealed.
@@ -1010,7 +1022,7 @@ int main(int argc, const char * const argv[])
 	 * an unsealed backup region would just move the unprotected link.
 	 */
 	write_txct(cct_backup_sector);
-	write_cct_crc(cct_backup_crc_sector);
+	write_cct_crc(cct_backup_crc_sector, 1);
 	fprintf(stderr, "\rwriting root fixed fnode...\n");
 	write_root_fixed_fnode();
 	fprintf(stderr, "\rwriting root directory...\n");

@@ -353,8 +353,11 @@ int main(int argc, const char * const argv[])
 		status_printf(0, "crash count table remains untrusted; skipping further checks");
 		goto ret;
 	}
-	/* Phase 3.2: restore/recreate the cct mirror using both check results */
-	if (__unlikely(r = repair_cct_backup())) goto ret;
+	/*
+	 * repair_cct_backup() runs once, above. It used to run a second time
+	 * here; with the create branch not recording its result, the second
+	 * call allocated another backup and leaked the first.
+	 */
 	if (__unlikely(r = check_apages())) goto ret;
 	if (__unlikely(r = check_dir_tree())) goto ret;
 	if (__unlikely(r = fix_cct())) goto ret;

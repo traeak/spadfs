@@ -116,6 +116,120 @@ static int cct_backup_present;	/* region exists and is block-aligned */
 static int cct_backup_bad = 1;	/* present but failed verification */
 static int cct_backup_usable;	/* present and fully verified good */
 
+/* Task 3.3: the backup's epoch stamp, set by check_cct_backup() */
+static int cct_backup_stamped;	/* a valid stamp that agrees with the data */
+static unsigned cct_backup_stamp_cc;
+static __u32 cct_backup_stamp_txc;
+
+/* scratch copy of a whole cct, raw disk-endian words like cct[] */
+static __u32 cct_scratch[CCT_SIZE / 4];
+
+/*
+ * Read a whole cct-shaped region into dst. Sector by sector, because
+ * read_buffer hands back a pointer into a pool that later reads recycle.
+ */
+static int read_cct_region(__u64 base, __u32 *dst, const char *what)
+{
+	unsigned i;
+
+	for (i = 0; i < CCT_SECTORS; i++) {
+		unsigned char *b = read_buffer(base + i, 1, 0);
+
+		if (__unlikely(!b)) {
+			log_printf(0, "CANT READ %s SECTOR %u: %s", what, i, buffer_error);
+			return 1;
+		}
+		memcpy((char *)dst + (unsigned long)i * 512, b, 512);
+	}
+	return 0;
+}
+
+/*
+ * Write a whole cct (src, raw disk-endian) to a data region, then compute and
+ * write its CRC units. With stamped, the last unit carries the epoch stamp
+ * (struct.h): cc is the volume's current tx.cc and txc is src[cc], i.e. the
+ * stamp describes exactly the bytes written. The kernel stamps the cc it is
+ * working in, which is tx.cc - 1 while mounted and tx.cc after a clean
+ * unmount; fsck stamps tx.cc, which the next mount will work in.
+ *
+ * Every place fsck rewrites a cct goes through here, so data and CRCs can
+ * never be written for different bytes. crc == 0 means the volume has no CRC
+ * region; only the data is written.
+ */
+static int write_cct_copy(__u64 data, __u64 crc, const __u32 *src,
+			  int stamped, const char *what)
+{
+	static unsigned char unit[512];
+	unsigned u, i;
+
+	if (__unlikely(write_buffer(data, CCT_SECTORS, src))) {
+		log_printf(0, "CANT WRITE %s AT %"blk_format"X: %s", what, (blk_t)data, buffer_error);
+		return 1;
+	}
+	if (!crc)
+		return 0;
+	for (u = 0; u < CCT_CRC_UNITS; u++) {
+		memset(unit, 0, sizeof unit);
+		for (i = 0; i < CCT_CRC_PER_UNIT; i++) {
+			unsigned sector = u * CCT_CRC_PER_UNIT + i;
+
+			if (sector >= CCT_SECTORS)
+				break;
+			spadfs_meta_put_crc(unit + i * 4,
+					    spadfs_crc32c_std((const char *)src + (unsigned long)sector * 512, 512));
+		}
+		if (stamped && u == CCT_BACKUP_STAMP_UNIT) {
+			struct cct_backup_stamp *st =
+				(struct cct_backup_stamp *)(unit + CCT_BACKUP_STAMP_OFF);
+			unsigned cc = SPAD2CPU16_LV(&tx.cc);
+
+			CPU2SPAD32_LV(&st->magic, CCT_BACKUP_STAMP_MAGIC);
+			CPU2SPAD32_LV(&st->cc, cc);
+			CPU2SPAD32_LV(&st->txc, SPAD2CPU32_LV(&src[cc]));
+			CPU2SPAD32_LV(&st->reserved, 0);
+		}
+		spadfs_meta_seal(unit);
+		if (__unlikely(write_buffer(crc + u, 1, unit))) {
+			log_printf(0, "CANT WRITE %s CRC UNIT %u: %s", what, u, buffer_error);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Is the backup from the crash epoch the volume is in now?
+ *
+ * Within an epoch only cct[cc] moves, and only upward, one commit at a time.
+ * A backup a commit or two behind therefore holds exactly an earlier commit
+ * point, and restoring it is a clean rollback -- what a crash does anyway.
+ * A backup from an older epoch is missing whole epochs' worth of entries;
+ * restoring it makes everything written since read INVALID and reverts it.
+ *
+ * Current means stamp.cc is tx.cc (clean unmount, or fsck stamped it) or
+ * tx.cc - 1 (the kernel's working cc while mounted, or after a crash).
+ */
+static int cct_backup_epoch_current(void)
+{
+	unsigned cc = SPAD2CPU16_LV(&tx.cc);
+
+	return cct_backup_stamped && tx_valid &&
+	       cct_backup_stamp_cc <= cc && cct_backup_stamp_cc + 1 >= cc;
+}
+
+/* Mark the mirror as just rewritten from a known-good cct. */
+static void cct_backup_now_current(const __u32 *src)
+{
+	unsigned cc = SPAD2CPU16_LV(&tx.cc);
+
+	cct_backup_present = 1;
+	cct_backup_bad = 0;
+	cct_backup_usable = 1;
+	cct_backup_stamped = 1;
+	cct_backup_stamp_cc = cc;
+	cct_backup_stamp_txc = SPAD2CPU32_LV(&src[cc]);
+}
+
 int check_cct_crc(void)
 {
 	static __u32 stored[CCT_SECTORS];
@@ -226,34 +340,6 @@ int check_cct_crc(void)
  * formatted without the feature; that is not an error, so return clean.
  */
 /*
- * Copy n_sectors from src to dst, one sector at a time through a private
- * buffer. The bounce through copybuf is not paranoia: read_buffer hands back a
- * pointer into a shared pool that write_buffer can recycle underneath it, so
- * copying straight from the read pointer to the write would be a use-after-
- * invalidate waiting to happen.
- */
-static int copy_sectors(__u64 dst, __u64 src, unsigned n_sectors, const char *what)
-{
-	static unsigned char copybuf[512];
-	unsigned i;
-
-	for (i = 0; i < n_sectors; i++) {
-		unsigned char *b = read_buffer(src + i, 1, 0);
-
-		if (__unlikely(!b)) {
-			log_printf(0, "CANT READ %s SECTOR %u: %s", what, i, buffer_error);
-			return 1;
-		}
-		memcpy(copybuf, b, 512);
-		if (__unlikely(write_buffer(dst + i, 1, copybuf))) {
-			log_printf(0, "CANT WRITE %s SECTOR %u: %s", what, i, buffer_error);
-			return 1;
-		}
-	}
-	return 0;
-}
-
-/*
  * Phase 3.1 + 3.2: the crash-count table backup mirror.
  *
  * Full two-layer verification, mirroring check_cct_crc():
@@ -285,6 +371,7 @@ int check_cct_backup(void)
 	cct_backup_present = 0;
 	cct_backup_bad = 1;
 	cct_backup_usable = 0;
+	cct_backup_stamped = 0;
 
 	if (!backup || !backup_crc) {
 		log_printf(0, "NO CCT BACKUP REGION IN SUPERBLOCK");
@@ -337,9 +424,23 @@ int check_cct_backup(void)
 				break;
 			stored[sector] = spadfs_meta_get_crc(unit + i * 4);
 		}
+		/* Task 3.3: the stamp is sealed by this unit's trailer */
+		if (u == CCT_BACKUP_STAMP_UNIT) {
+			struct cct_backup_stamp *st =
+				(struct cct_backup_stamp *)(unit + CCT_BACKUP_STAMP_OFF);
+
+			if (SPAD2CPU32_LV(&st->magic) == CCT_BACKUP_STAMP_MAGIC &&
+			    !SPAD2CPU32_LV(&st->reserved) &&
+			    SPAD2CPU32_LV(&st->cc) < CCT_SIZE / 4) {
+				cct_backup_stamped = 1;
+				cct_backup_stamp_cc = SPAD2CPU32_LV(&st->cc);
+				cct_backup_stamp_txc = SPAD2CPU32_LV(&st->txc);
+			}
+		}
 	}
 
 	if (__unlikely(bad_units)) {
+		cct_backup_stamped = 0;
 		log_printf(0, "CCT BACKUP CRC TABLE UNTRUSTWORTHY (%d BAD UNIT(S)); CANNOT VERIFY BACKUP",
 			   bad_units);
 		return 1;
@@ -363,8 +464,34 @@ int check_cct_backup(void)
 	}
 
 	if (__unlikely(bad_sectors)) {
+		cct_backup_stamped = 0;
 		log_printf(0, "CCT BACKUP CORRUPT: %d SECTOR(S) FAIL CHECKSUM", bad_sectors);
 		return 1;
+	}
+
+	/*
+	 * The stamp must describe the data it sits next to: stamp.txc is the
+	 * value the writer put in cct[stamp.cc]. Both are sealed, so a mismatch
+	 * is not bit rot: it is a mirror update torn by a crash (on 512-byte
+	 * blocks the stamp unit is a separate write from the data's CRC unit)
+	 * or a writer bug. Either way the backup's age is unknown.
+	 */
+	if (cct_backup_stamped) {
+		unsigned char *sec = read_buffer(backup + cct_backup_stamp_cc / 128, 1,
+						 BUFFER_FREE_SOON);
+
+		if (__unlikely(!sec)) {
+			log_printf(0, "CANT READ CCT BACKUP SECTOR %u: %s",
+				   cct_backup_stamp_cc / 128, buffer_error);
+			return 0;
+		}
+		if (__unlikely(SPAD2CPU32_LV(&((__u32 *)sec)[cct_backup_stamp_cc % 128]) !=
+			       cct_backup_stamp_txc)) {
+			log_printf(0, "CCT BACKUP STAMP DOES NOT MATCH ITS DATA (CC %X: STAMP %08X, DATA %08X)",
+				   cct_backup_stamp_cc, (unsigned)cct_backup_stamp_txc,
+				   (unsigned)SPAD2CPU32_LV(&((__u32 *)sec)[cct_backup_stamp_cc % 128]));
+			cct_backup_stamped = 0;
+		}
 	}
 
 	cct_backup_bad = 0;
@@ -373,42 +500,70 @@ int check_cct_backup(void)
 }
 
 /*
- * Task 3.2: the recovery decision matrix.
+ * Task 3.2 + 3.3: the recovery decision matrix.
  *
- * primary | backup    | action
- * --------+-----------+---------------------------------------------------
- * good    | good      | nothing
- * good    | bad       | recreate the mirror from the primary
- * good    | absent    | create the mirror
- * bad     | good      | restore the primary from the mirror
- * bad     | bad       | no non-destructive recovery; fall back to reset
- * bad     | absent    | same -- reset
+ * primary | backup             | action
+ * --------+--------------------+------------------------------------------
+ * good    | good, current      | nothing
+ * good    | good, out of date  | refresh the mirror from the primary
+ * good    | bad                | recreate the mirror from the primary
+ * good    | absent             | create the mirror
+ * bad     | good, same epoch   | restore (auto-answered by -y)
+ * bad     | good, older/no stamp | restore only on an explicit YES
+ * bad     | bad                | no non-destructive recovery; fall back to reset
+ * bad     | absent             | same -- reset
  *
- * THE RESTORE IS Q_IMPORTANT AND MUST NOT BE AUTO-ANSWERED.
+ * WHY THE STAMP DECIDES WHETHER -y MAY RESTORE
  *
- * Reason, and it is not caution for its own sake: until Task 3.3 teaches the
- * kernel commit path to keep the mirror current, the mirror is only as fresh
- * as the last time mkspadfs wrote it. Restoring it on a volume that has been
- * mounted since would roll the crash-count epoch back to zero.
+ * CC_VALID(cc, txc) is (s32)(cct[cc] - txc) >= 0. Restoring an older cct
+ * makes every structure written since read INVALID and promotes its older
+ * alternate: files created since vanish, deleted files return, renames
+ * unwind. How much is lost depends entirely on how old the backup is.
  *
- * That is not a benign stale-copy problem, it is silent data reversion.
- * CC_VALID(cc, txc) is (s32)(cct[cc] - txc) >= 0, so a cct reset to zero
- * makes every structure with txc > 0 read as INVALID, which promotes the
- * older alternate version: files created since vanish, deleted files return,
- * renames unwind. The volume mounts and lies.
+ * The kernel keeps the mirror one flush behind the primary (Task 3.3), so a
+ * backup from the current epoch is at most the commit in progress behind --
+ * restoring it is the same rollback a crash performs, and is safe to do
+ * unattended. A backup from an older epoch, or one with no stamp, is the
+ * silent-reversion case and stays Q_IMPORTANT: a human must say YES.
  *
- * So this function makes the restore available and correct in mechanism, but
- * gated on a human who can see the staleness warning. Task 3.3 must add an
- * epoch stamp to the mirror so fsck can prove freshness instead of guessing;
- * until then auto-restore is unsafe by construction.
+ * The common way to get here is a crash during a commit, between the cct
+ * write and its CRC landing. That commit was never acknowledged, so falling
+ * back to the backup loses nothing that was promised.
  */
 int repair_cct_backup(void)
 {
 	int r;
+	unsigned cc = SPAD2CPU16_LV(&tx.cc);
 
-	/* both fine -- nothing to do */
-	if (__likely(!cct_primary_bad_flag && cct_backup_usable))
+	if (!cct_primary_bad_flag && cct_backup_usable) {
+		/*
+		 * Both verify. Verification proves each copy is internally
+		 * consistent, never that the mirror is current, so compare.
+		 */
+		static __u32 backup_copy[CCT_SIZE / 4];
+
+		if (read_cct_region(SPAD2CPU64_LV(&super.cct), cct_scratch, "CCT"))
+			return 0;
+		if (read_cct_region(SPAD2CPU64_LV(&super.cct_backup), backup_copy, "CCT BACKUP"))
+			return 0;
+		if (__likely(!memcmp(cct_scratch, backup_copy, CCT_SIZE)) &&
+		    __likely(cct_backup_epoch_current()))
+			return 0;
+		if (cct_backup_stamped)
+			log_printf(0, "CCT BACKUP IS OUT OF DATE (BACKUP CC %X TXC %08X, VOLUME CC %X TXC %08X)",
+				   cct_backup_stamp_cc, (unsigned)cct_backup_stamp_txc,
+				   cc, (unsigned)SPAD2CPU32_LV(&cct_scratch[cc]));
+		else
+			log_printf(0, "CCT BACKUP IS OUT OF DATE (NO EPOCH STAMP)");
+		if (query(qprefix Q_NOFIX, "REFRESH CCT BACKUP FROM THE INTACT PRIMARY?")) {
+			if (write_cct_copy(SPAD2CPU64_LV(&super.cct_backup), SPAD2CPU64_LV(&super.cct_backup_crc),
+					   cct_scratch, 1, "CCT BACKUP"))
+				return 0;
+			cct_backup_now_current(cct_scratch);
+			log_printf(0, "CCT BACKUP REFRESHED");
+		}
 		return 0;
+	}
 
 	if (__unlikely(cct_primary_bad_flag && cct_backup_bad)) {
 		log_printf(0, "BOTH THE CRASH COUNT TABLE AND ITS BACKUP ARE DAMAGED");
@@ -419,45 +574,56 @@ int repair_cct_backup(void)
 	}
 
 	if (cct_primary_bad_flag && cct_backup_usable) {
-		log_printf(0, "CRASH COUNT TABLE IS DAMAGED BUT ITS BACKUP VERIFIES");
-		if (!query(qprefix Q_IMPORTANT,
-			   "RESTORE CRASH COUNT TABLE FROM BACKUP?"))
+		int yes;
+
+		if (cct_backup_epoch_current()) {
+			log_printf(0, "CRASH COUNT TABLE IS DAMAGED BUT ITS BACKUP VERIFIES");
+			log_printf(0, "THE BACKUP IS FROM THE CURRENT CRASH EPOCH (CC %X TXC %08X, VOLUME CC %X)",
+				   cct_backup_stamp_cc, (unsigned)cct_backup_stamp_txc, cc);
+			log_printf(0, "RESTORING IT ROLLS BACK AT MOST THE COMMIT IN PROGRESS");
+			yes = query(qprefix 0, "RESTORE CRASH COUNT TABLE FROM BACKUP?");
+		} else {
+			log_printf(0, "CRASH COUNT TABLE IS DAMAGED BUT ITS BACKUP VERIFIES");
+			if (!cct_backup_stamped)
+				log_printf(0, "THE BACKUP HAS NO VALID EPOCH STAMP; ITS AGE CANNOT BE PROVED");
+			else
+				log_printf(0, "THE BACKUP IS FROM CRASH COUNT %X BUT THE VOLUME IS AT %X",
+					   cct_backup_stamp_cc, cc);
+			log_printf(0, "RESTORING AN OLDER BACKUP CAN SILENTLY REVERT FILES TO AN OLDER STATE");
+			yes = query(qprefix Q_IMPORTANT, "RESTORE CRASH COUNT TABLE FROM BACKUP?");
+		}
+		if (!yes)
 			return 0;
+
 		/*
-		 * Copy the mirror's data AND its CRC region, so the primary ends
-		 * up exactly equal to something that was just verified as a
-		 * whole. Recomputing only one half would leave the two halves
-		 * describing different bytes.
+		 * Write the primary from the verified mirror, with CRCs computed
+		 * from the same bytes, so the two halves cannot describe
+		 * different data. The primary carries no stamp.
 		 */
-		if (copy_sectors(SPAD2CPU64_LV(&super.cct), SPAD2CPU64_LV(&super.cct_backup),
-			       CCT_BACKUP_SECTORS, "CCT BACKUP->PRIMARY DATA"))
+		if (read_cct_region(SPAD2CPU64_LV(&super.cct_backup), cct_scratch, "CCT BACKUP"))
 			return 0;
-		if (copy_sectors(SPAD2CPU64_LV(&super.cct_crc), SPAD2CPU64_LV(&super.cct_backup_crc),
-			       CCT_BACKUP_CRC_UNITS, "CCT BACKUP->PRIMARY CRC"))
+		if (write_cct_copy(SPAD2CPU64_LV(&super.cct), SPAD2CPU64_LV(&super.cct_crc),
+				   cct_scratch, 0, "CRASH COUNT TABLE"))
 			return 0;
 
 		/*
 		 * Reload the in-memory table. check_cct() filled cct[] from the
 		 * damaged primary, and everything downstream -- cc_check(),
-		 * fix_txblock(), the directory walk -- reads it. Leaving it stale
-		 * after a successful on-disk restore would be the worst kind of
-		 * half-fix.
-		 *
-		 * cct[] holds the raw disk-endian words exactly as check_cct()
-		 * stored them, so a straight sector-wise memcpy reproduces that.
+		 * fix_txblock(), the directory walk -- reads it. cct[] holds raw
+		 * disk-endian words, as does cct_scratch.
 		 */
-		{
-			unsigned i;
-
-			for (i = 0; i < CCT_BACKUP_SECTORS; i++) {
-				unsigned char *b = read_buffer(SPAD2CPU64_LV(&super.cct) + i, 1, 0);
-
-				if (__unlikely(!b)) {
-					log_printf(0, "CANT RELOAD RESTORED CCT SECTOR %u: %s",
-						   i, buffer_error);
-					return 0;
-				}
-				memcpy((char *)cct + (unsigned long)i * 512, b, 512);
+		memcpy(cct, cct_scratch, CCT_SIZE);
+		/*
+		 * check_cct() frees the cct's blocks in the allocation map when
+		 * it rejects the table. Claim them back, or fix_apages() writes
+		 * the cct region out as FREE and the kernel can later allocate
+		 * over it. (Present since Task 3.2: the next pass reported
+		 * "rebuilding apages" after every restore.)
+		 */
+		if (!cct_valid) {
+			if (__unlikely(r = alloc_blocks(SPAD2CPU64_LV(&super.cct), CCT_SIZE >> SSIZE_BITS))) {
+				if (r == 1) log_printf(0, "CRASH COUNT TABLE ALLOCATION ERROR: %s", alloc_error);
+				return r == 1 ? 0 : r;
 			}
 		}
 		cct_valid = 1;
@@ -468,12 +634,12 @@ int repair_cct_backup(void)
 
 	if (!cct_primary_bad_flag && cct_backup_present && cct_backup_bad) {
 		if (query(qprefix Q_NOFIX, "RECREATE CCT BACKUP FROM THE INTACT PRIMARY?")) {
-			if (copy_sectors(SPAD2CPU64_LV(&super.cct_backup), SPAD2CPU64_LV(&super.cct),
-				       CCT_BACKUP_SECTORS, "CCT PRIMARY->BACKUP DATA"))
+			if (read_cct_region(SPAD2CPU64_LV(&super.cct), cct_scratch, "CCT"))
 				return 0;
-			if (copy_sectors(SPAD2CPU64_LV(&super.cct_backup_crc), SPAD2CPU64_LV(&super.cct_crc),
-				       CCT_BACKUP_CRC_UNITS, "CCT PRIMARY->BACKUP CRC"))
+			if (write_cct_copy(SPAD2CPU64_LV(&super.cct_backup), SPAD2CPU64_LV(&super.cct_backup_crc),
+					   cct_scratch, 1, "CCT BACKUP"))
 				return 0;
+			cct_backup_now_current(cct_scratch);
 			log_printf(0, "CCT BACKUP RECREATED");
 		}
 		return 0;
@@ -486,24 +652,50 @@ int repair_cct_backup(void)
 					 / block_sectors * block_sectors;
 			__u64 b, bc;
 
+			if (read_cct_region(SPAD2CPU64_LV(&super.cct), cct_scratch, "CCT"))
+				return 0;
 			if (__unlikely(r = alloc_space(1, "CCT BACKUP", CCT_BACKUP_SECTORS, 0, 1, &b)))
 				return r;
 			if (__unlikely(r = alloc_space(1, "CCT BACKUP CRC", crc_span, 0, 1, &bc)))
 				return r;
+			/* data before the pointers: never point at an unwritten region */
+			if (write_cct_copy(b, bc, cct_scratch, 1, "NEW CCT BACKUP"))
+				return 0;
 			CPU2SPAD64_LV(&super.cct_backup, b);
 			CPU2SPAD64_LV(&super.cct_backup_crc, bc);
 			write_super();
-			if (copy_sectors(b, SPAD2CPU64_LV(&super.cct), CCT_BACKUP_SECTORS,
-				       "CCT PRIMARY->NEW BACKUP DATA"))
-				return 0;
-			if (copy_sectors(bc, SPAD2CPU64_LV(&super.cct_crc), CCT_BACKUP_CRC_UNITS,
-				       "CCT PRIMARY->NEW BACKUP CRC"))
-				return 0;
+			/*
+			 * Record that the backup now exists. Without this a second
+			 * call saw "absent" again and allocated another one, leaking
+			 * the first: CCT BACKUP CREATED twice, then LOST SECTORS.
+			 */
+			cct_backup_now_current(cct_scratch);
 			log_printf(0, "CCT BACKUP CREATED AT %"blk_format"X", b);
 		}
 	}
 
 	return 0;
+}
+
+/*
+ * Keep the CRCs and the mirror in step with a cct fsck itself rewrote
+ * (fix_cct: reset, overwrite or reallocation). Writing the data alone left
+ * the primary failing its own CRCs on the next run -- e.g. after
+ * --reset-crash-counts: CCT SECTOR 0 DOES NOT MATCH ITS CHECKSUM -- and the
+ * mirror describing the table from before the rewrite.
+ */
+static void write_cct_everywhere(void)
+{
+	if (write_cct_copy(SPAD2CPU64_LV(&super.cct), SPAD2CPU64_LV(&super.cct_crc),
+			   (const __u32 *)cct, 0, "CRASH COUNT TABLE"))
+		return;
+	cct_primary_bad_flag = 0;
+	if (SPAD2CPU64_LV(&super.cct_backup) && SPAD2CPU64_LV(&super.cct_backup_crc)) {
+		if (write_cct_copy(SPAD2CPU64_LV(&super.cct_backup), SPAD2CPU64_LV(&super.cct_backup_crc),
+				   (const __u32 *)cct, 1, "CCT BACKUP"))
+			return;
+		cct_backup_now_current((const __u32 *)cct);
+	}
 }
 
 int recover_cct_allocs(void)
@@ -550,7 +742,7 @@ int fix_cct(void)
 		CPU2SPAD16_LV(&tx.cc, 0);
 		write_txblock();
 		do_write:
-		write_buffer(SPAD2CPU64_LV(&super.cct), CCT_SIZE >> SSIZE_BITS, cct);
+		write_cct_everywhere();
 	}
 	return 0;
 }

@@ -718,11 +718,19 @@ static int spadfs_start_new_tx(SPADFS *fs)
  * change is regenerated from the in-RAM cct_crc[] mirror, so no sector in
  * the written block is left to whatever the page cache happened to hold.
  */
-static int spadfs_write_cct_crc(SPADFS *fs, unsigned first, unsigned last)
+/*
+ * The same writer serves the primary CRC region and the backup's (Task 3.3):
+ * base is the region start, [first_unit, last_unit] the units that must be
+ * rewritten, and stamped puts the backup epoch stamp (struct.h) into the
+ * slack of the last unit before it is sealed. The primary leaves that slack
+ * zero. base must be block-aligned; validate_super() guarantees it, and an
+ * unaligned base would make blk_first_unit wrap.
+ */
+static int spadfs_write_cct_crc(SPADFS *fs, sector_t base,
+				unsigned first_unit, unsigned last_unit,
+				int stamped)
 {
 	unsigned nsec = 1U << fs->sectors_per_buffer_bits;
-	unsigned first_unit = first / CCT_CRC_PER_UNIT;
-	unsigned last_unit = last / CCT_CRC_PER_UNIT;
 	unsigned b, s, i;
 	int rr = 0;
 
@@ -730,12 +738,12 @@ static int spadfs_write_cct_crc(SPADFS *fs, unsigned first, unsigned last)
 		last_unit = CCT_CRC_UNITS - 1;
 
 	/* the blocks holding the units in range */
-	for (b = (fs->cct_crc_sec + first_unit) >> fs->sectors_per_buffer_bits;
-	     b <= (fs->cct_crc_sec + last_unit) >> fs->sectors_per_buffer_bits;
+	for (b = (base + first_unit) >> fs->sectors_per_buffer_bits;
+	     b <= (base + last_unit) >> fs->sectors_per_buffer_bits;
 	     b++) {
 		struct buffer_head *cbh;
 		sector_t blk_first_unit =
-			(b << fs->sectors_per_buffer_bits) - fs->cct_crc_sec;
+			((sector_t)b << fs->sectors_per_buffer_bits) - base;
 		__u8 *page = spadfs_get_new_sector(fs,
 					b << fs->sectors_per_buffer_bits,
 					&cbh, "spadfs_write_cct_crc");
@@ -765,6 +773,19 @@ static int spadfs_write_cct_crc(SPADFS *fs, unsigned first, unsigned last)
 						    sector < CCT_SECTORS ?
 						    fs->cct_crc[sector] : 0);
 			}
+			if (stamped && u == CCT_BACKUP_STAMP_UNIT) {
+				struct cct_backup_stamp *st = (struct cct_backup_stamp *)
+					(unit + CCT_BACKUP_STAMP_OFF);
+
+				/*
+				 * fs->cct[fs->cc] is still the value written to
+				 * disk: callers run before spadfs_start_new_tx.
+				 */
+				CPU2SPAD32_LV(&st->magic, CCT_BACKUP_STAMP_MAGIC);
+				CPU2SPAD32_LV(&st->cc, fs->cc);
+				CPU2SPAD32_LV(&st->txc, SPAD2CPU32_LV(&fs->cct[fs->cc]));
+				CPU2SPAD32_LV(&st->reserved, 0);
+			}
 			spadfs_meta_seal(unit);
 		}
 		end_atomic_buffer_modify(fs, cbh);
@@ -778,6 +799,173 @@ static int spadfs_write_cct_crc(SPADFS *fs, unsigned first, unsigned last)
 		}
 	}
 	return rr;
+}
+
+/*
+ * The cct backup mirror (Task 3.3).
+ *
+ * The mirror is only worth restoring if it is current, so the kernel keeps
+ * it so: one full copy when the volume goes read-write, then on every commit
+ * the same cct block the primary got, plus the stamped CRC unit.
+ *
+ * A mirror failure never fails a commit or a mount. Losing the backup loses
+ * a recovery option; failing the commit would lose the filesystem. On any
+ * mirror error the mirror stops being updated for the rest of the mount, and
+ * because the stamp is then left behind, fsck will refuse to restore from it
+ * without asking.
+ */
+/*
+ * Clear the backup's epoch stamp before the primary moves on without it.
+ *
+ * A valid stamp promises the mirror is at most the commit in progress behind
+ * (struct.h). Once we stop mirroring, that promise is false, and a stamp left
+ * in place would let fsck restore an arbitrarily old mirror unattended.
+ * Clearing it makes fsck ask a human instead.
+ *
+ * Read-modify-write of the one stamp unit: unlike spadfs_write_cct_crc this
+ * must not regenerate the other units from fs->cct_crc[], which describes
+ * the PRIMARY -- the mirror's CRCs are only equal to it while the mirror is
+ * live. A unit that does not verify is left alone: it already makes fsck
+ * reject the mirror, and resealing it would only hide that.
+ */
+static void spadfs_cct_backup_unstamp(SPADFS *fs)
+{
+	struct buffer_head *bh;
+	__u8 *unit;
+	struct cct_backup_stamp *st;
+	int r;
+
+	if (!fs->cct_backup_sec)
+		return;
+	unit = spadfs_read_sector(fs, fs->cct_backup_crc_sec + CCT_BACKUP_STAMP_UNIT,
+				  &bh, 1, "spadfs_cct_backup_unstamp");
+	if (unlikely(IS_ERR(unit))) {
+		printk(KERN_WARNING "spadfs: cannot read the crash count table backup stamp (%ld); run spadfsck before trusting the backup\n",
+		       PTR_ERR(unit));
+		return;
+	}
+	st = (struct cct_backup_stamp *)(unit + CCT_BACKUP_STAMP_OFF);
+	if (spadfs_meta_verify(unit) ||
+	    SPAD2CPU32_LV(&st->magic) != CCT_BACKUP_STAMP_MAGIC) {
+		spadfs_brelse(fs, bh);
+		return;
+	}
+	start_atomic_buffer_modify(fs, bh);
+	memset(st, 0, sizeof(*st));
+	spadfs_meta_seal(unit);
+	end_atomic_buffer_modify(fs, bh);
+	r = spadfs_sync_dirty_buffer(bh);
+	spadfs_brelse(fs, bh);
+	if (likely(!r))
+		r = spadfs_issue_flush(fs);
+	if (unlikely(r))
+		printk(KERN_WARNING "spadfs: cannot clear the crash count table backup stamp (%d); run spadfsck before trusting the backup\n",
+		       r);
+}
+
+static void spadfs_cct_backup_failed(SPADFS *fs, int r)
+{
+	printk(KERN_WARNING "spadfs: write error %d in the crash count table backup; not updating it again this mount, run spadfsck to refresh it\n",
+	       r);
+	fs->cct_backup_live = 0;
+	spadfs_cct_backup_unstamp(fs);
+}
+
+/* Write cct sectors [first, first + n) to the mirror, n a whole buffer count. */
+static int spadfs_cct_backup_write_data(SPADFS *fs, unsigned first, unsigned n,
+					int sync_each)
+{
+	unsigned nsec = 1U << fs->sectors_per_buffer_bits;
+	unsigned i;
+
+	for (i = first; i < first + n; i += nsec) {
+		struct buffer_head *bh;
+		void *data = spadfs_get_new_sector(fs, fs->cct_backup_sec + i,
+						   &bh, "spadfs_cct_backup");
+
+		if (unlikely(IS_ERR(data)))
+			return PTR_ERR(data);
+		start_atomic_buffer_modify(fs, bh);
+		spadfs_memcpy(data, (char *)fs->cct + (i << 9), nsec * 512);
+		end_atomic_buffer_modify(fs, bh);
+		if (sync_each) {
+			int r = spadfs_sync_dirty_buffer(bh);
+
+			spadfs_brelse(fs, bh);
+			if (unlikely(r))
+				return r;
+		} else {
+			spadfs_brelse(fs, bh);
+		}
+	}
+	return 0;
+}
+
+/*
+ * Make the mirror a full copy of the cct, stamped with this mount's cc.
+ * Called before spadfs_increase_cc(fs, 1) when the volume goes read-write, so
+ * fs->cct is still exactly the on-disk primary and fs->cc is the crash count
+ * this mount will work in. Stamping before the tx block moves on means fsck
+ * sees the stamp as current whether a crash lands before or after it does.
+ *
+ * Refuses unless the primary matched every stored CRC at mount: copying a
+ * damaged primary over the backup would destroy the copy fsck needs.
+ */
+static void spadfs_cct_backup_start(SPADFS *fs)
+{
+	int r;
+
+	if (fs->cct_backup_live || !fs->cct_backup_sec)
+		return;
+	if (!fs->cct_verified) {
+		printk(KERN_WARNING "spadfs: crash count table did not verify at mount; leaving its backup untouched, run spadfsck\n");
+		/* the primary will move on without it: withdraw the stamp */
+		spadfs_cct_backup_unstamp(fs);
+		return;
+	}
+	r = spadfs_cct_backup_write_data(fs, 0, CCT_SECTORS, 0);
+	if (likely(!r))
+		r = sync_blockdev(fs->s->s_bdev);
+	if (likely(!r))
+		r = spadfs_write_cct_crc(fs, fs->cct_backup_crc_sec,
+					 0, CCT_BACKUP_CRC_UNITS - 1, 1);
+	if (likely(!r))
+		r = spadfs_issue_flush(fs);
+	if (unlikely(r)) {
+		spadfs_cct_backup_failed(fs, r);
+		return;
+	}
+	fs->cct_backup_live = 1;
+}
+
+/*
+ * Mirror one commit: the cct block the primary just got, its CRC unit(s),
+ * and the stamp unit (which holds the new txc even when the touched sector
+ * lives in another unit). Runs after the primary is durable, so a crash here
+ * leaves a good primary and, at worst, a mirror fsck must recreate.
+ */
+static void spadfs_cct_backup_commit(SPADFS *fs, unsigned first,
+				     unsigned last)
+{
+	unsigned first_unit = first / CCT_CRC_PER_UNIT;
+	unsigned last_unit = last / CCT_CRC_PER_UNIT;
+	int r;
+
+	r = spadfs_cct_backup_write_data(fs, first, last - first + 1, 1);
+	if (likely(!r))
+		r = spadfs_write_cct_crc(fs, fs->cct_backup_crc_sec,
+					 first_unit, last_unit, 1);
+	/* the stamp unit, unless the write above already covered its block */
+	if (likely(!r) &&
+	    (fs->cct_backup_crc_sec + CCT_BACKUP_STAMP_UNIT) >> fs->sectors_per_buffer_bits !=
+	    (fs->cct_backup_crc_sec + last_unit) >> fs->sectors_per_buffer_bits)
+		r = spadfs_write_cct_crc(fs, fs->cct_backup_crc_sec,
+					 CCT_BACKUP_STAMP_UNIT,
+					 CCT_BACKUP_STAMP_UNIT, 1);
+	if (likely(!r))
+		r = spadfs_issue_flush(fs);
+	if (unlikely(r))
+		spadfs_cct_backup_failed(fs, r);
 }
 
 int spadfs_commit_unlocked(SPADFS *fs)
@@ -834,9 +1022,6 @@ int spadfs_commit_unlocked(SPADFS *fs)
 	rr = spadfs_sync_dirty_buffer(bh);
 	spadfs_brelse(fs, bh);
 
-	if (likely(!rr))
-		rr = spadfs_issue_flush(fs);
-
 	if (unlikely(rr != 0)) {
 		spadfs_error(fs, TXFLAGS_IO_WRITE_ERROR,
 			"write error in crash count table: %d", rr);
@@ -847,19 +1032,23 @@ int spadfs_commit_unlocked(SPADFS *fs)
 	}
 
 	/*
-	 * Compute and write the side CRCs for the cct sectors we just pushed.
+	 * Compute and write the side CRCs for the cct sectors we just pushed,
+	 * then flush both together. That flush is the commit point.
 	 *
-	 * This MUST happen before spadfs_start_new_tx: that call increments
-	 * fs->cct[fs->cc], and a CRC taken after the increment would describe
-	 * bytes that are not the bytes on disk. Computing from the same
+	 * The CRCs MUST be computed before spadfs_start_new_tx: that call
+	 * increments fs->cct[fs->cc], and a CRC taken after the increment would
+	 * describe bytes that are not the bytes on disk. Computing from the same
 	 * snapshot the memcpy used is what keeps the pair meaningful.
 	 *
-	 * Ordering of the two writes is cct-then-crc. A crash in between leaves
-	 * the crc describing the previous cct, which fsck reports as a
-	 * mismatch. That is the fail-safe direction: it over-reports rather
-	 * than blessing a torn cct. Nothing fails at mount, so a crash here is
-	 * recoverable rather than fatal -- see the A5 rationale in
-	 * spadfs_fill_super.
+	 * Data and CRC go out under ONE flush. Before Task 3.3 the CRC was
+	 * written after the flush and never flushed itself, so a crash after the
+	 * commit returned -- i.e. after fsync promised durability -- could leave
+	 * a durable cct with a stale CRC. fsck then calls the primary damaged
+	 * and the only fix is the backup, which is one commit older: an
+	 * acknowledged commit lost. Now, once this flush completes, both halves
+	 * are durable; a crash before it can leave them disagreeing, but that
+	 * commit was never acknowledged, so falling back to the backup (the
+	 * previous commit) is a correct outcome.
 	 */
 	{
 		unsigned nsec = 1U << fs->sectors_per_buffer_bits;
@@ -871,15 +1060,37 @@ int spadfs_commit_unlocked(SPADFS *fs)
 		for (sc = sector; sc <= last; sc++)
 			fs->cct_crc[sc] = spadfs_crc32c_std((char *)fs->cct + (sc << 9), 512);
 
-		rr = spadfs_write_cct_crc(fs, sector, last);
+		if (likely(fs->cct_crc_sec)) {
+			rr = spadfs_write_cct_crc(fs, fs->cct_crc_sec,
+						  sector / CCT_CRC_PER_UNIT,
+						  last / CCT_CRC_PER_UNIT, 0);
+			if (unlikely(rr)) {
+				spadfs_error(fs, TXFLAGS_IO_WRITE_ERROR,
+					"write error in cct crc table: %d", rr);
+				spadfs_update_error_flags(fs);
+				if (!r)
+					r = rr;
+				goto unlock_ret;
+			}
+		}
+
+		rr = spadfs_issue_flush(fs);
 		if (unlikely(rr)) {
 			spadfs_error(fs, TXFLAGS_IO_WRITE_ERROR,
-				"write error in cct crc table: %d", rr);
+				"write error in crash count table: %d", rr);
 			spadfs_update_error_flags(fs);
 			if (!r)
 				r = rr;
 			goto unlock_ret;
 		}
+
+		/*
+		 * The primary is durable; now bring the mirror to the same
+		 * state. Its own flush means the mirror is never left behind
+		 * by more than the commit in progress. Never fails the commit.
+		 */
+		if (fs->cct_backup_live)
+			spadfs_cct_backup_commit(fs, sector, last);
 	}
 
 	rr = spadfs_start_new_tx(fs);
@@ -1079,6 +1290,7 @@ static int spadfs_reconfigure(struct fs_context *fc)
 	}
 	spadfs_setup_params(fs, fc);
 	if (remount_rw) {
+		spadfs_cct_backup_start(fs);
 		if ((r = spadfs_increase_cc(fs, 1))) {
 			if (r < 0)
 				goto unlock_ret_r;
@@ -1130,6 +1342,7 @@ __cold static int spadfs_remount_fs(struct super_block *s, int *flags, char *dat
 			CPU2SPAD32_LV(&fs->cct[fs->cc],
 				      SPAD2CPU32_LV(&fs->cct[fs->cc]) - 1);
 		} else {
+			spadfs_cct_backup_start(fs);
 			if ((r = spadfs_increase_cc(fs, 1))) {
 				if (r < 0)
 					goto unlock_ret_r;
@@ -1453,6 +1666,11 @@ read_again:
 	fs->apage_index1_sec = SPAD2CPU64_LV(&sb->apage_index[1]);
 	fs->cct_sec = SPAD2CPU64_LV(&sb->cct);
 	fs->cct_crc_sec = SPAD2CPU64_LV(&sb->cct_crc);
+	/* validate_super() checked these: 0 = absent, else a real region */
+	fs->cct_backup_sec = SPAD2CPU64_LV(&sb->cct_backup);
+	fs->cct_backup_crc_sec = SPAD2CPU64_LV(&sb->cct_backup_crc);
+	if (!fs->cct_backup_sec || !fs->cct_backup_crc_sec)
+		fs->cct_backup_sec = fs->cct_backup_crc_sec = 0;
 	fs->root_sec = SPAD2CPU64_LV(&sb->root);
 	fs->size = SPAD2CPU64_LV(&sb->size);
 	fs->reserve_sectors = SPAD2CPU64_LV(&sb->reserve_sectors);
@@ -1608,6 +1826,12 @@ read_again:
 			printk(KERN_WARNING "spadfs: crash count table: %u of %u cct sector(s) do not match their CRC, %u of %u CRC unit(s) unusable; running spadfsck is recommended\n",
 			       mismatched, (unsigned)CCT_SECTORS,
 			       bad_units, (unsigned)CCT_CRC_UNITS);
+		/*
+		 * Only a cct that matched every stored CRC may be copied over
+		 * the backup. Copying a damaged primary would destroy the one
+		 * good copy fsck could restore from.
+		 */
+		fs->cct_verified = fs->cct_crc_sec && !bad_units && !mismatched;
 	}
 
 	fs->n_apages = N_APAGES(fs->size, fs->pagesize_bits, fs->sectors_per_disk_block_bits + 9);
@@ -1706,6 +1930,8 @@ read_again:
 		goto err3;
 
 	if (!sb_rdonly(s)) {
+		/* before the tx block moves on; see spadfs_cct_backup_start */
+		spadfs_cct_backup_start(fs);
 		if ((r = spadfs_increase_cc(fs, 1))) {
 			if (r < 0)
 				goto err3;

@@ -74,7 +74,7 @@ PY
 run_fsck() {
 	local img="$1"; shift
 	FSCK_OUT="$WORKDIR/out.txt"
-	"$FSCK" "$@" "$img" >"$FSCK_OUT" 2>&1 || true
+	"$FSCK" "$@" "$img" >"$FSCK_OUT" 2>&1
 	FSCK_RC=$?
 }
 
@@ -95,6 +95,14 @@ assert_not_contains() {
 	else
 		ok "$1"
 	fi
+}
+
+# stamp_is <desc> <img> <expected> -- compare cctstamp.py's one-line summary
+stamp_is() {
+	local desc="$1" img="$2" want="$3" got
+	got=$(python3 -I "$TESTS_DIR/cctstamp.py" show "$img" | tr '\n' ' ')
+	got=${got% }
+	[ "$got" = "$want" ] && ok "$desc" || bad "$desc" "want '$want', got '$got'"
 }
 
 # --- build a volume whose mirror is actually current ------------------------
@@ -143,13 +151,35 @@ print('DIFFER' if prim!=bak else 'SAME')")
 	fi
 
 	run_fsck "$img" -f -y
-	# The mirror is stale, yet fsck must still call it usable -- verification
-	# says nothing about currency. Assert that explicitly.
+	# The mirror is stale but internally consistent: verification alone says
+	# nothing about currency, so it is NOT corrupt. Task 3.3's comparison and
+	# stamp are what notice it, and the primary is intact, so -y refreshes it.
 	assert_not_contains "stale mirror is NOT reported corrupt" \
 		"CCT BACKUP CORRUPT"
 	assert_not_contains "stale mirror triggers no restore" \
 		"RESTORE CRASH COUNT TABLE FROM BACKUP"
-	log "       ^ this is why Task 3.3 needs an epoch stamp on the mirror"
+	assert_contains "stale mirror is reported out of date" \
+		"CCT BACKUP IS OUT OF DATE"
+	assert_contains "stale mirror is refreshed from the intact primary" \
+		"CCT BACKUP REFRESHED"
+	stamp_is "refreshed mirror matches the primary, stamped with the volume's cc" \
+		"$img" "magic=ok stamp_cc=4 stamp_txc=1776 sealed=yes tx_cc=4 primary_txc=1776 mirror=same"
+	run_fsck "$img" -f -n
+	assert_not_contains "second pass finds the mirror current" \
+		"CCT BACKUP IS OUT OF DATE"
+}
+
+# --------------------------------------------------------------------------
+# case: mkspadfs stamps the mirror from birth
+# --------------------------------------------------------------------------
+case_fresh_stamped() {
+	local img="$WORKDIR/fresh.img"
+	make_image "$img" "$SIZE" "--checksums" || { bad "fresh: make_image"; return; }
+	stamp_is "fresh volume: mirror stamped cc 0 and identical to the primary" \
+		"$img" "magic=ok stamp_cc=0 stamp_txc=0 sealed=yes tx_cc=0 primary_txc=0 mirror=same"
+	run_fsck "$img" -f -n
+	assert_not_contains "fresh volume: fsck does not call the mirror out of date" \
+		"CCT BACKUP IS OUT OF DATE"
 }
 
 # --------------------------------------------------------------------------
@@ -168,29 +198,51 @@ case_both_good() {
 }
 
 # --------------------------------------------------------------------------
-# case 2: primary corrupt, backup good -- restore offered, gated
+# case 2: primary corrupt, backup current -- -y restores it
 # --------------------------------------------------------------------------
-case_restore_gated() {
+case_restore_current() {
 	local img="$WORKDIR/c2.img"
 	make_synced_volume "$img" || { bad "case2 setup"; return; }
 	corrupt "$img" cct 20 || { bad "case2 corrupt"; return; }
 
-	# -y must NOT auto-approve a restore: it is Q_IMPORTANT.
-	#
-	# Note on what can be asserted from stdout: query() routes both the
-	# prompt text and the "DANGEROUS ACTIONS CANNOT BE AUTOANSWERED" reply
-	# through log_only_*, i.e. to the log file rather than stdout. So the
-	# gate is asserted by its EFFECT here -- no restore happened -- and the
-	# prompt text itself is asserted in case 3, which runs interactively
-	# where query() uses _vprintf.
+	# The mirror is stamped with the volume's own crash count, so restoring
+	# it is at most a rollback of the commit in progress -- what a crash
+	# does anyway. That is safe unattended, so -y answers it (Task 3.3).
 	run_fsck "$img" -f -y
 	assert_contains "2: fsck detects the damaged primary" \
 		"CRASH COUNT TABLE CORRUPT"
 	assert_contains "2: fsck recognises the backup as a valid source" \
 		"ITS BACKUP VERIFIES"
-	assert_not_contains "2: -y did not silently restore" \
+	assert_contains "2: the backup is recognised as current" \
+		"THE BACKUP IS FROM THE CURRENT CRASH EPOCH"
+	assert_contains "2: -y restores a current backup" \
 		"CRASH COUNT TABLE RESTORED FROM BACKUP"
-	# and the primary is still the corrupted bytes -- nothing was written
+	assert_not_contains "2: the pass is not abandoned" \
+		"remains untrusted"
+	stamp_is "2: restored primary matches the mirror" \
+		"$img" "magic=ok stamp_cc=4 stamp_txc=1776 sealed=yes tx_cc=4 primary_txc=1776 mirror=same"
+	run_fsck "$img" -f -n
+	[ "$FSCK_RC" -eq 0 ] && ok "2: restored volume checks clean (rc=0)" \
+		|| bad "2: restored volume rc=$FSCK_RC" "$(tail -5 "$FSCK_OUT")"
+}
+
+# --------------------------------------------------------------------------
+# case 2b: primary corrupt, backup from an older epoch -- -y must refuse
+# --------------------------------------------------------------------------
+case_restore_stale_gated() {
+	local img="$WORKDIR/c2b.img"
+	make_image "$img" "$SIZE" "--checksums" || { bad "case2b make_image"; return; }
+	# primed to cc 4, mirror left as mkfs wrote it: stamped cc 0
+	python3 "$TESTS_DIR/prime.py" "$img" --cc 4 --base-txc 1388 >&2 || { bad "case2b prime"; return; }
+	corrupt "$img" cct 20 || { bad "case2b corrupt"; return; }
+
+	run_fsck "$img" -f -y
+	assert_contains "2b: the backup is identified as from an older epoch" \
+		"THE BACKUP IS FROM CRASH COUNT 0 BUT THE VOLUME IS AT 4"
+	assert_contains "2b: the reversion risk is stated" \
+		"SILENTLY REVERT"
+	assert_not_contains "2b: -y does not restore a stale backup" \
+		"CRASH COUNT TABLE RESTORED FROM BACKUP"
 	local still_bad
 	still_bad=$(python3 -c "
 import sys; sys.path.insert(0,'$TESTS_DIR')
@@ -201,21 +253,54 @@ f.seek(d['cct']*512+20); a=f.read(1)
 f.seek(d['cct_backup']*512+20); b=f.read(1)
 print('DIFFER' if a!=b else 'SAME')")
 	[ "$still_bad" = "DIFFER" ] \
-		&& ok "2: primary left untouched under -y (still differs from mirror)" \
-		|| bad "2: primary was modified despite -y gating the restore"
+		&& ok "2b: primary left untouched under -y (still differs from mirror)" \
+		|| bad "2b: primary was modified despite -y gating the restore"
 }
 
 # --------------------------------------------------------------------------
-# case 3: primary corrupt, backup good -- interactive YES performs restore
+# case 2c: primary corrupt, backup without a valid stamp -- -y must refuse
+# --------------------------------------------------------------------------
+case_restore_unstamped_gated() {
+	local img="$WORKDIR/c2c.img"
+	make_synced_volume "$img" || { bad "case2c setup"; return; }
+	python3 -I "$TESTS_DIR/cctstamp.py" set "$img" magic 0 || { bad "case2c unstamp"; return; }
+	corrupt "$img" cct 20 || { bad "case2c corrupt"; return; }
+
+	run_fsck "$img" -f -y
+	assert_contains "2c: a backup without a stamp is called unprovable" \
+		"NO VALID EPOCH STAMP"
+	assert_not_contains "2c: -y does not restore an unstamped backup" \
+		"CRASH COUNT TABLE RESTORED FROM BACKUP"
+}
+
+# --------------------------------------------------------------------------
+# case 2d: a stamp that disagrees with the mirror's data is not trusted
+# --------------------------------------------------------------------------
+case_stamp_mismatch() {
+	local img="$WORKDIR/c2d.img"
+	make_synced_volume "$img" || { bad "case2d setup"; return; }
+	python3 -I "$TESTS_DIR/cctstamp.py" set "$img" txc 1777 || { bad "case2d restamp"; return; }
+	corrupt "$img" cct 20 || { bad "case2d corrupt"; return; }
+
+	run_fsck "$img" -f -y
+	assert_contains "2d: stamp/data disagreement is reported" \
+		"CCT BACKUP STAMP DOES NOT MATCH ITS DATA"
+	assert_not_contains "2d: -y does not restore on a mismatched stamp" \
+		"CRASH COUNT TABLE RESTORED FROM BACKUP"
+}
+
+# --------------------------------------------------------------------------
+# case 3: primary corrupt, stale backup -- interactive YES performs restore
 # --------------------------------------------------------------------------
 case_restore_yes() {
 	local img="$WORKDIR/c3.img"
-	make_synced_volume "$img" || { bad "case3 setup"; return; }
+	make_image "$img" "$SIZE" "--checksums" || { bad "case3 make_image"; return; }
+	python3 "$TESTS_DIR/prime.py" "$img" --cc 4 --base-txc 1388 >&2 || { bad "case3 prime"; return; }
 	corrupt "$img" cct 24 || { bad "case3 corrupt"; return; }
 
 	# No -y; feed explicit YES to the Q_IMPORTANT prompt. Extra YES lines are
 	# harmless: they answer any later prompts the forced pass raises.
-	printf 'YES\nYES\nYES\nYES\n' | "$FSCK" -f "$img" >"$WORKDIR/c3.out" 2>&1 || true
+	printf 'YES\nYES\nYES\nYES\nYES\nYES\n' | "$FSCK" -f "$img" >"$WORKDIR/c3.out" 2>&1 || true
 
 	if grep -qiF "RESTORE CRASH COUNT TABLE FROM BACKUP?" "$WORKDIR/c3.out"; then
 		ok "3: the Q_IMPORTANT prompt is shown interactively"
@@ -230,23 +315,16 @@ case_restore_yes() {
 		return
 	fi
 
-	# The restored volume must now verify clean, and the mirror and primary
-	# must agree byte-for-byte again.
 	local same
-	same=$(python3 -c "
-import sys; sys.path.insert(0,'$TESTS_DIR')
-from sbinfo import read_super
-d=read_super('$img')
-f=open('$img','rb')
-f.seek(d['cct']*512); prim=f.read(512*512)
-f.seek(d['cct_backup']*512); bak=f.read(512*512)
-print('SAME' if prim==bak else 'DIFFER')")
-	[ "$same" = "SAME" ] && ok "3: restored primary matches the mirror" \
+	same=$(python3 -I "$TESTS_DIR/cctstamp.py" show "$img" | sed -n 's/^mirror=//p')
+	[ "$same" = "same" ] && ok "3: restored primary matches the mirror" \
 		|| bad "3: primary and mirror still differ after restore"
 
 	run_fsck "$img" -f -y
 	assert_not_contains "3: restored volume reports no backup corruption" \
 		"CCT BACKUP CORRUPT"
+	assert_not_contains "3: restored primary verifies against its CRCs" \
+		"DOES NOT MATCH ITS CHECKSUM"
 }
 
 # --------------------------------------------------------------------------
@@ -270,46 +348,95 @@ case_both_bad() {
 }
 
 # --------------------------------------------------------------------------
-# case 5: backup region absent
+# case 5: backup region absent -- created exactly once
 # --------------------------------------------------------------------------
 case_no_backup() {
 	local img="$WORKDIR/c5.img"
 	make_synced_volume "$img" || { bad "case5 setup"; return; }
-	python3 - "$img" "$TESTS_DIR" <<'PY' || { bad "case5 wipe"; return; }
-import sys
+	# Zero both backup pointers and reseal the superblock with CRC-32C. (An
+	# earlier version resealed with zlib.crc32, i.e. CRC-32 with a stray
+	# seed, so the superblock it produced did not actually verify.)
+	python3 - "$img" "$TESTS_DIR" <<'INNER' || { bad "case5 wipe"; return; }
+import struct, sys
 img, tdir = sys.argv[1], sys.argv[2]
 sys.path.insert(0, tdir)
-from sbinfo import read_super, SECTOR
-d = read_super(img)
-# zero the cct_backup pointer (offset 112) so the volume looks backup-less
+from sbinfo import SUPERBLOCK_SECTOR, SECTOR
+from prime import crc32c_std
 with open(img, 'r+b') as f:
-    f.seek(d['cct_crc'] * SECTOR)  # touch nothing; placeholder to keep seek valid
-    f.seek(16384 * SECTOR + 112)
-    f.write(b'\x00' * 8)
-    # re-seal the superblock trailer so only the pointer is gone
-    f.seek(16384 * SECTOR)
-    blk = bytearray(f.read(512))
-import zlib
-del blk[508:512]
-crc = zlib.crc32(bytes(blk) + b'\x00'*4, 0x82c653ae) & 0xFFFFFFFF
-with open(img, 'r+b') as f:
-    f.seek(16384 * SECTOR + 508)
-    f.write(crc.to_bytes(4, 'little'))
-print("cleared cct_backup pointer", file=sys.stderr)
-PY
+    f.seek(SUPERBLOCK_SECTOR * SECTOR)
+    blk = bytearray(f.read(SECTOR))
+    blk[112:128] = b'\x00' * 16          # cct_backup, cct_backup_crc
+    struct.pack_into('<I', blk, 508, crc32c_std(bytes(blk[:508])))
+    f.seek(SUPERBLOCK_SECTOR * SECTOR)
+    f.write(blk)
+print("cleared both cct_backup pointers", file=sys.stderr)
+INNER
 	run_fsck "$img" -f -y
 	assert_contains "5: reports the missing backup region" \
 		"NO CCT BACKUP REGION IN SUPERBLOCK"
+	assert_not_contains "5: the edited superblock still verifies" \
+		"BAD CHECKSUM"
+	local n
+	n=$(grep -c 'CCT BACKUP CREATED AT' "$FSCK_OUT")
+	[ "$n" -eq 1 ] && ok "5: the backup is created exactly once" \
+		|| bad "5: backup created $n times (a second one leaks the first)"
+	# Zeroing the pointers orphaned the old backup (512 sectors) and its
+	# CRC region (5 units rounded up to whole blocks), so fsck must reclaim
+	# exactly that much -- not that plus a second, leaked backup.
+	local bs orphan
+	bs=$(( 1 << $(python3 -I "$TESTS_DIR/sbinfo.py" "$img" | sed -n 's/^sectors_per_block_bits=//p') ))
+	orphan=$(( 512 + (5 + bs - 1) / bs * bs ))
+	if grep -qF "FILESYSTEM HAS $orphan LOST SECTORS IN 1 RUNS" "$FSCK_OUT"; then
+		ok "5: only the orphaned old backup ($orphan sectors) is reclaimed"
+	else
+		bad "5: lost-sector count is not the orphaned old backup ($orphan)" \
+			"$(grep -F 'LOST SECTORS' "$FSCK_OUT" | tr -d '\r' | sed 's/.*FILESYSTEM/FILESYSTEM/')"
+	fi
+	stamp_is "5: the new backup is a stamped copy of the primary" \
+		"$img" "magic=ok stamp_cc=4 stamp_txc=1776 sealed=yes tx_cc=4 primary_txc=1776 mirror=same"
+	run_fsck "$img" -f -y
+	assert_not_contains "5: second pass creates nothing" \
+		"CCT BACKUP CREATED"
+	assert_not_contains "5: second pass finds no lost sectors" \
+		"LOST SECTORS"
+}
+
+# --------------------------------------------------------------------------
+# case 6: --reset-crash-counts keeps the CRCs and the mirror in step
+# --------------------------------------------------------------------------
+case_reset_crash_counts() {
+	local img="$WORKDIR/c6.img"
+	make_synced_volume "$img" || { bad "case6 setup"; return; }
+	run_fsck "$img" -f -y --reset-crash-counts
+	# rc bits 1 (modified) and 2 (reboot needed) are normal for a reset
+	[ $(( FSCK_RC & ~3 )) -eq 0 ] && ok "6: reset pass completes with no error bits (rc=$FSCK_RC)" \
+		|| bad "6: reset pass rc=$FSCK_RC" "$(tail -5 "$FSCK_OUT")"
+	stamp_is "6: after the reset the mirror is a stamped copy of the new table" \
+		"$img" "magic=ok stamp_cc=0 stamp_txc=0 sealed=yes tx_cc=0 primary_txc=0 mirror=same"
+	run_fsck "$img" -f -y
+	assert_not_contains "6: the reset table verifies against its CRCs" \
+		"DOES NOT MATCH ITS CHECKSUM"
+	assert_not_contains "6: the pass is not abandoned" \
+		"remains untrusted"
+	assert_not_contains "6: no restore from a pre-reset backup is offered" \
+		"RESTORE CRASH COUNT TABLE FROM BACKUP"
+	assert_not_contains "6: the mirror is current" \
+		"CCT BACKUP IS OUT OF DATE"
 }
 
 # --- run ------------------------------------------------------------------
 
 case_stale_backup_verifies
+case_fresh_stamped
 case_both_good
-case_restore_gated
+case_restore_current
+case_restore_stale_gated
+case_restore_unstamped_gated
+case_stamp_mismatch
 case_restore_yes
 case_both_bad
 case_no_backup
+case_reset_crash_counts
 
 echo
 summary
