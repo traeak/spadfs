@@ -152,7 +152,7 @@ else
 fi
 
 if grep -qiE "CCT BACKUP" "$OUT"; then
-	echo "  --- backup lines (mirror is mkfs-only until Task 3.3) ---"
+	echo "  --- backup lines (kernel mirrors every commit since Task 3.3) ---"
 	grep -iE "CCT BACKUP" "$OUT" | sed 's/^/    /' | head -6
 fi
 

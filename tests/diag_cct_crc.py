@@ -122,9 +122,38 @@ def main():
         c = crc32c_std(bu[:META_COVER]) & 0xFFFFFFFF
         print(f"  backup crc unit 0 seal  : stored {s:08x} computed {c:08x} "
               f"{'MATCH' if s == c else 'MISMATCH'}")
-        print("  (the backup is mkfs-only until Task 3.3, so it still describes")
-        print("   the all-zero table -- which is why fsck says it 'verifies' while")
-        print("   being completely stale.)")
+
+        # The kernel mirrors every commit (Task 3.3), so after a clean
+        # unmount or a crash between commits the data sectors must match
+        # the primary byte for byte. Only the last CRC unit may differ: its
+        # slack carries the epoch stamp, which the primary leaves zero.
+        diff = []
+        for sec in range(CCT_SECTORS):
+            f.seek((cct + sec) * SECTOR)
+            pd = f.read(SECTOR)
+            f.seek((b + sec) * SECTOR)
+            if f.read(SECTOR) != pd:
+                diff.append(sec)
+        print(f"  cct sectors differing from primary: {len(diff)}"
+              + (f"  first few: {diff[:12]}" if diff else ""))
+        stamp_unit = UNITS - 1
+        udiff = []
+        for u in range(stamp_unit):
+            f.seek((bc + u) * SECTOR)
+            if f.read(SECTOR) != units[u]:
+                udiff.append(u)
+        print(f"  crc units 0..{stamp_unit - 1} differing from primary: "
+              f"{udiff if udiff else 'none'}")
+        f.seek((bc + stamp_unit) * SECTOR)
+        su = f.read(SECTOR)
+        off = (CCT_SECTORS - stamp_unit * CRC_PER_UNIT) * 4
+        magic, scc, stxc, rsv = (int.from_bytes(su[off + i:off + i + 4], "little")
+                                 for i in range(0, 16, 4))
+        print(f"  epoch stamp (unit {stamp_unit} byte {off}): magic {magic:08x} "
+              f"{'OK' if magic == 0x53544343 else 'ABSENT/CLEARED'} "
+              f"cc={scc} txc={stxc} reserved={rsv}")
+        if magic != 0x53544343:
+            print("  (no valid stamp: the mirror does not vouch for being current)")
 
     f.close()
 
