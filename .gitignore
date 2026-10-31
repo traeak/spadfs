@@ -28,3 +28,6 @@ spadfs2.mod
 /spadfsck
 __pycache__/
 /tests/crc_agreement
+
+# agent session transcripts
+/pi-session-*.html
