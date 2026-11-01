@@ -271,3 +271,47 @@ until the rig runs.
 - **fnode_block trailer coverage.** Structurally blocked — the fnode chain is
   terminated by the 512-byte block boundary, so 508..511 cannot be reserved.
 - **Cat 3 (dnode/apage).** Needs a side table and has no harness coverage.
+
+---
+
+## Status — 2026-10-30
+
+| Item | State |
+|---|---|
+| 3.1 layout | Landed (`90dbb58`) |
+| 3.2 fsck recovery matrix | Landed (`c2e3248`), `tests/cct_recovery.sh` 49/49 |
+| 3.3 kernel mirror | Landed (`2177240`). On hardware: 0 of 512 cct sectors and CRC units 0–3 differ from the primary after a read-write mount; stamp valid (`cc=2 txc=1`) |
+| 3.4 write cost | **Script ready, needs a root run:** `sudo tests/commit_cost.sh`. Compares against the 27 ms/commit pre-3.3 baseline in `tests/HARDWARE-NOTES.md` |
+
+The 3A-vs-3B choice is settled by what was built: neither as drafted. The
+full copy happens once per read-write mount; each commit adds one mirror
+block, one stamp unit and one flush. 3.4 now only has to show that is
+acceptable. It no longer chooses a design.
+
+### Open questions — answered
+
+1. **Epoch stamp in 3A?** Yes. Built as `{magic, cc, txc, reserved}` with
+   the invariant in `struct.h`. See the Task 3.3 plan.
+2. **"Too stale to restore" rule?** Moot: 3B was not built. Unattended
+   restore requires `stamp.cc` ∈ {`tx.cc-1`, `tx.cc`} and a matching `txc`;
+   anything older asks.
+3. **256 KiB × 2 at the small end?** Acceptable. The smallest volume
+   `mkspadfs2` accepts is 16 MiB (8 MiB is refused: `MIN_SIZE` is
+   `SUPERBLOCK_SECTOR + 2048` sectors, and the first 8 MiB is already
+   reserved ahead of the superblock). There the mirror and its CRC
+   region cost about 1.6% of the volume, about 0.4% at 64 MiB, and
+   are negligible above that.
+4. **Fixed offset from the end?** No. The superblock and its backup
+   both locate the mirror, so a damaged superblock does not hide it.
+   Moving it would change the layout code in all three readers. The only
+   gain would be surviving damage that spans both adjacent tables. That
+   gain does not justify a second layout change. Closed.
+
+### Merge gate (Task 3.3) — state
+
+1. Write cost measured: **pending the root run above.**
+2. `commit_seq`: resolved, field dropped.
+3. Mount → commit → unmount byte-identical with a valid stamp: **done on
+   hardware** (`diag_cct_crc.py`, 2026-10-30).
+4. Unprivileged suite green: roundtrip 18/18, cct_recovery 49/49, crash
+   harness suites all pass.
