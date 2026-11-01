@@ -11,6 +11,10 @@
 
 set -uo pipefail
 
+# grub-reboot is stubbed below, so there is no real grubenv to prove durable.
+# grubenv_durable has its own tests in crash_attr_test.sh.
+export GRUBENV_VERIFY=true
+
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$TESTS_DIR/lib.sh"
 # shellcheck disable=SC1091

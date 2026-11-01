@@ -111,16 +111,25 @@ run "green checks alone never arm the control" "1" "$rc"
 
 # ------------------------------------- positive control: record found ----
 PS="$WORKDIR/pstore"
+N=0123456789abcdef
 mkdir -p "$PS"
-rc=0; control_record_found "$PS" >/dev/null 2>&1 || rc=$?
+rc=0; control_record_found "$PS" "$N" >/dev/null 2>&1 || rc=$?
 run "no records -> control not confirmed" "1" "$rc"
-printf '%s\n' '[ 9.0] Kernel panic - not syncing: something else' >"$PS/dmesg-ramoops-0"
-rc=0; control_record_found "$PS" >/dev/null 2>&1 || rc=$?
-run "an unrelated panic is not the control" "1" "$rc"
-printf '%s\n' '[ 9.1] sysrq: Trigger a crash' '[ 9.1] Kernel panic - not syncing: sysrq triggered crash' >"$PS/dmesg-ramoops-1"
-rc=0; found=$(control_record_found "$PS" 2>/dev/null) || rc=$?
-run "the sysrq control record is found" "0" "$rc"
+printf '%s\n' '[ 9.1] sysrq: Trigger a crash' '[ 9.1] Kernel panic - not syncing: sysrq triggered crash' >"$PS/dmesg-ramoops-0"
+rc=0; control_record_found "$PS" "$N" >/dev/null 2>&1 || rc=$?
+run "a sysrq panic WITHOUT this run's nonce is stale, not the control" "1" "$rc"
+rc=0; control_record_found "$PS" "" >/dev/null 2>&1 || rc=$?
+run "no nonce -> nothing can confirm" "1" "$rc"
+run "verdict with only a stale record: memory-lost" "memory-lost" "$(control_verdict "$PS" "$N")"
+printf '%s\n' "[ 9.2] spadfs-control nonce=$N" >"$PS/console-ramoops-0"
+run "nonce only in the console zone: dump-lost" "dump-lost" "$(control_verdict "$PS" "$N")"
+printf '%s\n' "[ 9.2] spadfs-control nonce=$N" '[ 9.3] sysrq: Trigger a crash' >"$PS/dmesg-ramoops-1"
+rc=0; found=$(control_record_found "$PS" "$N" 2>/dev/null) || rc=$?
+run "the record carrying this nonce is found" "0" "$rc"
 run "and named" "$PS/dmesg-ramoops-1" "$found"
 run "and left in place for the harvest" "yes" "$([ -f "$PS/dmesg-ramoops-1" ] && echo yes || echo no)"
+run "verdict: confirmed" "confirmed" "$(control_verdict "$PS" "$N")"
+run "another run's nonce is not confirmed" "memory-lost" \
+	"$(rm -f "$PS/console-ramoops-0"; control_verdict "$PS" fedcba9876543210)"
 
 summary

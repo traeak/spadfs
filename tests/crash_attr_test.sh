@@ -12,6 +12,10 @@
 
 set -uo pipefail
 
+# grub-reboot is stubbed below, so there is no real grubenv to prove durable.
+# grubenv_durable has its own tests in crash_attr_test.sh.
+export GRUBENV_VERIFY=true
+
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$TESTS_DIR/lib.sh"
 . "$TESTS_DIR/lib_crash_attr.sh"
@@ -264,6 +268,50 @@ assert_eq "boot_arm succeeds with a title" "0" "$rc"
 assert_eq "boot_arm passes the title as ONE argument" "spadfs crash test" "$(cat "$ARM_CALLS")"
 rc=0; GRUB_REBOOT="$WORKDIR/arm-fail" boot_arm "$AS" >/dev/null 2>&1 || rc=$?
 assert_eq "boot_arm reports a grub-reboot failure" "1" "$rc"
+
+rc=0; GRUB_REBOOT="$WORKDIR/arm-ok" GRUBENV_VERIFY=false boot_arm "$AS" >/dev/null 2>&1 || rc=$?
+assert_eq "boot_arm fails when grubenv is not visible to GRUB" "1" "$rc"
+
+# ------------------------------- grubenv_durable: the journal trap ----
+# Stubs: findmnt reports the fs, debugfs prints the on-disk grubenv the way
+# GRUB would see it, fsfreeze "checkpoints" by swapping in the fresh copy.
+GD="$WORKDIR/gd"
+mkdir -p "$GD"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "/dev/fake / $(cat %s/fstype)"\n' "$GD" >"$GD/findmnt"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>%s/debugfs.calls\ncat %s/ondisk\n' "$GD" "$GD" >"$GD/debugfs"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>%s/freeze.calls\n[ "$1" = -u ] && [ -f %s/after ] && cp %s/after %s/ondisk\nexit "$(cat %s/freeze_rc 2>/dev/null || echo 0)"\n' \
+	"$GD" "$GD" "$GD" "$GD" "$GD" >"$GD/fsfreeze"
+chmod +x "$GD/findmnt" "$GD/debugfs" "$GD/fsfreeze"
+gd_run() { # fstype ondisk-next_entry after-next_entry -> rc
+	printf '%s\n' "$1" >"$GD/fstype"
+	printf '# GRUB Environment Block\nnext_entry=%s\n' "$2" >"$GD/ondisk"
+	rm -f "$GD/after" "$GD/freeze_rc" "$GD/freeze.calls" "$GD/debugfs.calls"
+	[ -n "$3" ] && printf '# GRUB Environment Block\nnext_entry=%s\n' "$3" >"$GD/after"
+	rc=0
+	FINDMNT="$GD/findmnt" DEBUGFS="$GD/debugfs" FSFREEZE="$GD/fsfreeze" \
+		GRUBENV=/boot/grub/grubenv grubenv_durable "spadfs crash test" >/dev/null 2>&1 || rc=$?
+}
+gd_run ext4 "spadfs crash test" ""
+assert_eq "grubenv already on disk -> durable" "0" "$rc"
+assert_eq "  and no freeze was needed" "no" "$([ -f "$GD/freeze.calls" ] && echo yes || echo no)"
+assert_eq "  debugfs read without the journal, direct I/O" \
+	"-c -D -R cat /boot/grub/grubenv /dev/fake" "$(head -1 "$GD/debugfs.calls")"
+gd_run ext4 "" "spadfs crash test"
+assert_eq "stale on disk, checkpoint fixes it -> durable" "0" "$rc"
+assert_eq "  froze then thawed the mount" "-f /|-u /" "$(paste -sd'|' "$GD/freeze.calls")"
+gd_run ext4 "" ""
+assert_eq "still stale after checkpoint -> fail closed" "1" "$rc"
+gd_run ext4 "spadfs crash testX" ""
+assert_eq "a longer entry name is not a match" "1" "$rc"
+printf 'ext4\n' >"$GD/fstype"
+printf '# GRUB Environment Block\nnext_entry=\n' >"$GD/ondisk"
+printf '1\n' >"$GD/freeze_rc"; rm -f "$GD/after"
+rc=0; FINDMNT="$GD/findmnt" DEBUGFS="$GD/debugfs" FSFREEZE="$GD/fsfreeze" \
+	grubenv_durable "spadfs crash test" >/dev/null 2>&1 || rc=$?
+assert_eq "freeze refused -> fail closed" "1" "$rc"
+gd_run vfat "" ""
+assert_eq "no journal (vfat) -> sync is enough" "0" "$rc"
+assert_eq "  and debugfs is not consulted" "no" "$([ -f "$GD/debugfs.calls" ] && echo yes || echo no)"
 
 # ARMED record: per-cycle, durable, consumable
 assert_eq "no ARMED record -> capture absent" "absent" "$(capture_at_crash "$AS" 5)"

@@ -451,7 +451,7 @@ grub_strip_token() {
 # through the writes must come back on the test entry too.
 
 # boot_arm STATE_DIR -- select the test entry for the next boot only.
-# GRUB_REBOOT is injectable for tests.
+# GRUB_REBOOT and GRUBENV_VERIFY are injectable for tests.
 boot_arm() {
 	local sd=${1:-} title
 	title=$(boot_env_get "$sd" ENTRY_TITLE)
@@ -463,7 +463,73 @@ boot_arm() {
 		echo "boot_arm: grub-reboot '$title' failed" >&2
 		return 1
 	fi
+	if ! "${GRUBENV_VERIFY:-grubenv_durable}" "$title"; then
+		echo "boot_arm: grubenv is armed in the page cache but GRUB would not see it" >&2
+		return 1
+	fi
 	return 0
+}
+
+# grubenv_durable TITLE -- prove GRUB itself will read next_entry=TITLE.
+#
+# THE JOURNAL TRAP. grub-reboot rewrites grubenv and fsyncs it. On ext3/4 that
+# commits the new inode to the JOURNAL, but GRUB's ext driver never replays
+# the journal: it reads the inode at its home location, which still points at
+# the old blocks until jbd2 checkpoints -- seconds to minutes later. A panic
+# or sysrq 'b' inside that window boots the default entry. Observed on this
+# host: armed at 22:33:49, panicked ~3 s later, GRUB showed the menu, and
+# next_entry was still set on the next boot (GRUB would have cleared it).
+#
+# So: read the file the way GRUB does (debugfs -c ignores the journal, -D
+# bypasses the block-device page cache), and if it is stale, freeze/thaw the
+# filesystem -- ext4_freeze flushes AND checkpoints the journal -- then check
+# again. Fails closed: a reboot we cannot land on the test entry is not one
+# the harness should risk.
+#
+# DEBUGFS, FSFREEZE, FINDMNT and GRUBENV are injectable for tests.
+grubenv_durable() {
+	local title=${1:-} env=${GRUBENV:-/boot/grub/grubenv}
+	local debugfs=${DEBUGFS:-debugfs} fsfreeze=${FSFREEZE:-fsfreeze}
+	local findmnt=${FINDMNT:-findmnt} dev mnt fstype rel
+
+	[ -n "$title" ] || return 2
+	read -r dev mnt fstype < <("$findmnt" -n -o SOURCE,TARGET,FSTYPE -T "$env" 2>/dev/null)
+	if [ -z "$dev" ] || [ -z "$mnt" ]; then
+		echo "grubenv_durable: cannot find the filesystem holding $env" >&2
+		return 1
+	fi
+	case $fstype in
+	ext3 | ext4) ;;
+	*)
+		# No journal for GRUB to miss; a plain sync is what it needs.
+		sync -f "$env" 2>/dev/null || sync
+		return 0
+		;;
+	esac
+
+	rel=${env#"$mnt"}
+	rel="/${rel#/}"
+
+	grubenv_visible() {
+		"$debugfs" -c -D -R "cat $rel" "$dev" 2>/dev/null |
+			grep -qxF "next_entry=$1"
+	}
+
+	sync -f "$env" 2>/dev/null || sync
+	grubenv_visible "$title" && return 0
+
+	if ! "$fsfreeze" -f "$mnt"; then
+		echo "grubenv_durable: could not freeze $mnt to checkpoint its journal" >&2
+		return 1
+	fi
+	if ! "$fsfreeze" -u "$mnt"; then
+		echo "grubenv_durable: CRITICAL -- $mnt is frozen; run: fsfreeze -u $mnt" >&2
+		return 1
+	fi
+	grubenv_visible "$title" && return 0
+
+	echo "grubenv_durable: next_entry=$title is still not on disk where GRUB reads it" >&2
+	return 1
 }
 
 # armed_write STATE_DIR CYCLE -- durable record that cycle CYCLE ran with the

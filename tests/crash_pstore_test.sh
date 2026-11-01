@@ -11,6 +11,10 @@
 
 set -uo pipefail
 
+# grub-reboot is stubbed below, so there is no real grubenv to prove durable.
+# grubenv_durable has its own tests in crash_attr_test.sh.
+export GRUBENV_VERIFY=true
+
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$TESTS_DIR/lib.sh"
 # shellcheck disable=SC1091
@@ -187,6 +191,7 @@ assert_eq "ensure passes: cmdline token + reservation proven" "0" "$rc"
 assert_contains "ensure passed mem_address" "$(cat "$MODPROBE_CALLS")" "mem_address=0x103e000000"
 assert_contains "ensure passed mem_size (bytes, not '8M')" "$(cat "$MODPROBE_CALLS")" "mem_size=8388608"
 assert_contains "ensure requested ecc" "$(cat "$MODPROBE_CALLS")" "ecc="
+assert_contains "ensure requested a console zone (bytes)" "$(cat "$MODPROBE_CALLS")" "console_size=262144"
 
 # SAFETY: no reservation on the command line -> refuse, and never call modprobe
 : >"$MODPROBE_CALLS"

@@ -77,21 +77,49 @@ control_allowed() {
 	return 0
 }
 
-# control_record_found PSTORE_DIR
-# Did a previous positive control leave its record? Prints the first
-# dmesg-ramoops file containing the sysrq crash line. Read-only: the record
-# is left for crash_verify.sh's harvest, which owns erasing it.
+# control_record_found PSTORE_DIR NONCE
+# Did THIS positive control leave its record? The control writes a nonce to
+# the kernel log just before panicking, so only a record carrying that nonce
+# counts. Matching the generic sysrq line instead let a leftover record from
+# an earlier control report CONFIRMED before anything had crashed.
+# Prints the first dmesg-ramoops file containing the nonce. Read-only: the
+# record is left for crash_verify.sh's harvest, which owns erasing it.
 control_record_found() {
-	local ps=${1:-} f
-	[ -d "$ps" ] || return 1
+	local ps=${1:-} nonce=${2:-} f
+	[ -d "$ps" ] && [ -n "$nonce" ] || return 1
 	for f in "$ps"/dmesg-ramoops-*; do
 		[ -e "$f" ] || continue
-		if grep -qF 'sysrq: Trigger a crash' "$f" 2>/dev/null; then
+		if grep -qF "spadfs-control nonce=$nonce" "$f" 2>/dev/null; then
 			printf '%s\n' "$f"
 			return 0
 		fi
 	done
 	return 1
+}
+
+# control_verdict PSTORE_DIR NONCE -> confirmed | dump-lost | memory-lost
+# The console record is a second, independent channel: ramoops keeps the
+# previous boot's console log in its own zone. It tells the two failure
+# modes apart:
+#   confirmed    the panic dump carries the nonce
+#   dump-lost    the console zone kept the nonce but no dump does: the RAM
+#                survived the reset and the panic-time dump was not written
+#   memory-lost  neither has it: the reserved RAM did not survive the reset
+#                (or the console zone was not configured on the crashed boot)
+control_verdict() {
+	local ps=${1:-} nonce=${2:-} f
+	if control_record_found "$ps" "$nonce" >/dev/null; then
+		printf 'confirmed\n'
+		return 0
+	fi
+	for f in "$ps"/console-ramoops-*; do
+		[ -e "$f" ] || continue
+		if grep -qF "spadfs-control nonce=$nonce" "$f" 2>/dev/null; then
+			printf 'dump-lost\n'
+			return 0
+		fi
+	done
+	printf 'memory-lost\n'
 }
 
 # ------------------------------------------------------------- main -------
@@ -135,11 +163,30 @@ main() {
 	report 4 "reserved region is not claimed as System RAM" $? \
 		"grep the region in /proc/iomem; System RAM there means it was never reserved"
 
-	local rec
-	if rec=$(control_record_found "${PSTORE_DIR:-/sys/fs/pstore}"); then
+	# A pending control is one whose panic has not been checked yet.
+	local sd=${STATE_DIR:-/var/lib/spadfs-crash} ps=${PSTORE_DIR:-/sys/fs/pstore}
+	local nonce verdict
+	nonce=$(sed -n 's/^NONCE=//p' "$sd/CONTROL" 2>/dev/null | tail -1)
+	if [ -n "$nonce" ] && [ "$throwaway" -eq 0 ] && [ "$fails" -eq 0 ]; then
+		verdict=$(control_verdict "$ps" "$nonce")
 		echo
-		echo "  POSITIVE CONTROL CONFIRMED: a deliberate panic's record survived"
-		echo "        the reboot: $rec"
+		case $verdict in
+		confirmed)
+			echo "  POSITIVE CONTROL CONFIRMED: panic record for nonce $nonce survived"
+			echo "        the reboot: $(control_record_found "$ps" "$nonce")"
+			;;
+		dump-lost)
+			echo "  POSITIVE CONTROL FAILED (dump-lost): the console zone kept nonce"
+			echo "        $nonce, so the RAM survived, but no panic dump was written."
+			;;
+		*)
+			echo "  POSITIVE CONTROL FAILED (memory-lost): nothing in pstore carries"
+			echo "        nonce $nonce. The reserved RAM did not survive the reset"
+			echo "        (or the crashed boot loaded ramoops without a console zone)."
+			;;
+		esac
+		mv -f "$sd/CONTROL" "$sd/CONTROL.$verdict" 2>/dev/null || true
+		[ "$verdict" = confirmed ] || fails=$((fails + 1))
 	fi
 
 	echo
@@ -164,11 +211,26 @@ main() {
 		return 1
 	fi
 
+	# Clear the slate. Any record already in pstore is evidence from an
+	# earlier boot: file it, then erase it, so the next boot can only find
+	# what this panic writes.
+	pstore_harvest "$ps" "$sd" "control-pre.$(date -u +%Y%m%dT%H%M%SZ)" >/dev/null
+
+	# A fresh nonce, durable before the panic, ties the record to this run.
+	nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+	if ! { printf 'NONCE=%s\n' "$nonce" >"$sd/CONTROL.tmp" &&
+		fsync_file "$sd/CONTROL.tmp" &&
+		mv -f "$sd/CONTROL.tmp" "$sd/CONTROL" && fsync_dir "$sd"; }; then
+		echo "could not record the control nonce durably -- NOT panicking" >&2
+		return 1
+	fi
+
 	# The one-shot was used up getting onto this boot. Without re-arming,
 	# panic=10 reboots into the default entry, which cannot read the record
 	# and is free to overwrite it: the control would "fail" with the capture
-	# path working perfectly.
-	if ! boot_arm "${STATE_DIR:-/var/lib/spadfs-crash}"; then
+	# path working perfectly. boot_arm also proves grubenv is on disk where GRUB
+	# reads it, not just in the ext4 journal.
+	if ! boot_arm "$sd"; then
 		echo "could not re-arm the test entry -- NOT panicking" >&2
 		return 1
 	fi
@@ -179,6 +241,8 @@ main() {
 	echo "  sudo $0"
 	echo "and expect 'POSITIVE CONTROL CONFIRMED'."
 	sleep 3
+	# <2> = KERN_CRIT: above loglevel=4, so it reaches the console zone too.
+	printf '<2>spadfs-control nonce=%s\n' "$nonce" >/dev/kmsg
 	echo 1 >/proc/sys/kernel/sysrq 2>/dev/null || true
 	echo c >/proc/sysrq-trigger
 	echo "sysrq-trigger returned without crashing — that is itself a failure." >&2

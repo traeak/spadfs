@@ -104,9 +104,12 @@ ramoops_ensure() {
 	local sysmod=${SYS_MODULE_DIR:-/sys/module}
 	local record_size=${RECORD_SIZE:-1M}
 	local ecc=${ECC:-16}
+	# The console zone keeps the previous boot's console log. It is the second
+	# channel that tells "dump never written" from "RAM wiped by the reset".
+	local console_size=${CONSOLE_SIZE:-256K}
 	local cmdline_file=${CMDLINE:-/proc/cmdline}
 	local iomem_file=${IOMEM:-/proc/iomem}
-	local mrc=0 bytes rec_bytes
+	local mrc=0 bytes rec_bytes con_bytes
 
 	[ -n "$mem_addr" ] && [ -n "$mem_size" ] || {
 		echo "ramoops_ensure: need MEM_ADDR and MEM_SIZE" >&2
@@ -119,6 +122,10 @@ ramoops_ensure() {
 	}
 	rec_bytes=$(size_to_bytes "$record_size") || {
 		echo "ramoops_ensure: unparseable record_size '$record_size'" >&2
+		return 2
+	}
+	con_bytes=$(size_to_bytes "$console_size") || {
+		echo "ramoops_ensure: unparseable console_size '$console_size'" >&2
 		return 2
 	}
 
@@ -151,7 +158,8 @@ ramoops_ensure() {
 	# A non-zero rc here is not fatal on its own: modprobe errors when the
 	# module is already loaded. The directory check below is what decides.
 	"$modprobe" ramoops "mem_address=$mem_addr" "mem_size=$bytes" \
-		"record_size=$rec_bytes" "ecc=$ecc" >/dev/null 2>&1 || mrc=$?
+		"record_size=$rec_bytes" "console_size=$con_bytes" "ecc=$ecc" \
+		>/dev/null 2>&1 || mrc=$?
 
 	if [ ! -d "$sysmod/ramoops" ]; then
 		echo "ramoops_ensure: FAILED — ramoops is NOT loaded (modprobe rc=$mrc)." >&2
@@ -171,7 +179,7 @@ ramoops_ensure() {
 	att=$("$dmesg" 2>/dev/null | grep -iE 'pstore|ramoops' | tail -3)
 	[ -n "$att" ] && printf 'corroborating dmesg:\n%s\n' "$att"
 
-	echo "ramoops_ensure: OK — capture path live ($mem_addr, $bytes bytes, record $rec_bytes, ecc $ecc)"
+	echo "ramoops_ensure: OK — capture path live ($mem_addr, $bytes bytes, record $rec_bytes, console $con_bytes, ecc $ecc)"
 	return 0
 }
 
