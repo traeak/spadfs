@@ -241,6 +241,16 @@ struct superblock {
 #define MAX_SECTORS_PER_PAGE_BITS	8
 #define MAX_ALLOC_MASK_BITS		16
 #define MIN_SIZE			(SUPERBLOCK_SECTOR + 2048)
+
+/*
+ * Not an on-disk field: the shared policy for when the crash count is
+ * "close to the end". cc only advances on an unclean shutdown (or when
+ * cct[cc] exhausts 2^31 transactions); at 0xffff the kernel can only mount
+ * read-only, and spadfsck --reset-crash-counts rewrites every cc/txc to
+ * start over. From this value the kernel warns at each read-write mount and
+ * spadfsck offers the reset. Shared so the two cannot drift apart.
+ */
+#define CC_WARN_THRESHOLD		0xff00
 #define MAX_SIZE			((__u64)0x00010000 << 32)
 #define SIZE_MASK			(MAX_SIZE - 1)
 

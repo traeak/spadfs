@@ -66,7 +66,7 @@
 typedef __u64 blk_t;
 #define blk_format		__64_format
 
-#define MAX_CC			0xff00
+#define MAX_CC			CC_WARN_THRESHOLD	/* struct.h */
 
 /* this will enable options that have no practical use --- they can be used just
    to test fsck itself */

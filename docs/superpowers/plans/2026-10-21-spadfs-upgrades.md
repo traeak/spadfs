@@ -111,7 +111,7 @@ Two items move sharply. The rest hold.
 | **1** | **Identity switch** — `spadfs2` name, signature, version reset, Makefile | The fork point | 0 |
 | **2** | crc32c metadata checksums | Full replace | 1, 0.3 baseline |
 | **3** | cct backup table | Additive | 2 |
-| **4** | Widen `cc` 16→32 | Every structure | 3 |
+| **4** | ~~Widen `cc` 16→32~~ → crash-count ceiling made visible and tested (see `2026-10-30-phase4-cc-ceiling.md`: `cc` indexes the cct, so 32 bits needs a 16 GiB table) | None | 3 |
 | **5** | Hash function + clustering measurement | Layout-derived | 0.4 rig |
 | **6** | Symlink cap, sparse files | New structures | 2–4 |
 

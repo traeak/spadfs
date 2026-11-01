@@ -533,13 +533,21 @@ static int spadfs_increase_cc(SPADFS *fs, int inc)
 	if (likely(inc == 1)) {
 		u16 cc = SPAD2CPU16_LV(&tb->cc);
 		if (cc == 0xffff) {
-			/* !!! FIXME: process wrap-around */
-			spadfs_error(fs, TXFLAGS_FS_ERROR, "crash count wrap-around, remounting read-only");
+			/*
+			 * The wrap is handled offline, by design: recycling cc
+			 * values means rewriting the cc/txc pair of every
+			 * structure on the volume, which is what spadfsck's
+			 * reset pass does.
+			 */
+			spadfs_error(fs, TXFLAGS_FS_ERROR, "crash count wrap-around, remounting read-only; run spadfsck --reset-crash-counts");
 			rr = 1;
 			goto skip_inc;
 		}
 		cc += inc;
 		CPU2SPAD16_LV(&tb->cc, cc);
+		if (unlikely(cc >= CC_WARN_THRESHOLD))
+			printk(KERN_WARNING "spadfs: crash count is %04x of ffff, headroom for %u more unclean shutdown(s) before mounts become read-only; run spadfsck --reset-crash-counts\n",
+			       (unsigned)cc, 0xffffU - cc);
 		if (unlikely(SPAD2CPU32_LV(&fs->cct[cc]))) {
 			spadfs_error(fs, TXFLAGS_FS_ERROR,
 				"crash count table is damaged (non-zero at %04x: %08x)",

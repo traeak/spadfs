@@ -144,8 +144,9 @@ repair a SpadFS volume.
 After any `.gitignore` edit, verify:
 
 ```bash
-git add --dry-run -A . | grep -c utils/        # expect 31 — the tools' sources
-git add --dry-run -A . | grep -c spadfsck/    # expect 21 — fsck must be present
+git ls-files utils/ | wc -l                    # expect 33 — the tools' sources
+git ls-files utils/spadfsck/ | wc -l           # expect 21 — fsck must be present
+git ls-files -ci --exclude-standard            # expect nothing: no tracked file is ignored
 git status --ignored --porcelain -uall        # only binaries/artifacts listed
 ```
 
@@ -284,7 +285,9 @@ branch `main` with no commits yet.
 2. Full `spadfs.ko` builds; **no new warnings** beyond the known
    `MODULE_DESCRIPTION()` one.
 3. Built against ≥2 kernel versions if compat code was touched.
-4. `git add --dry-run -A . | grep -c utils/` still reports 31 (gitignore intact).
+4. `git ls-files -ci --exclude-standard` prints nothing and `git ls-files utils/ | wc -l`
+   still reports 33 (gitignore intact). (`git add --dry-run` only lists untracked
+   files, so it reads 0 once the sources are committed and proves nothing.)
 5. No LSP-derived "fixes" were made to satisfy the broken tool.
 6. On-disk format unchanged unless that was the explicit, reviewed task.
 
