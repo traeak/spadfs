@@ -99,6 +99,7 @@ test : $(MKFS_TOOL) $(FSCK_TOOL) crc-agreement
 	bash tests/lint_pipefail.sh
 	bash tests/cc_wrap.sh
 	python3 tests/logwrites_test.py
+	python3 tests/metasum_test.py
 	bash tests/restripe.sh > tests/BASELINE-restripe-attribution.md
 	@echo "regenerated both BASELINE files in tests/"
 

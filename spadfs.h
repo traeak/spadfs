@@ -654,6 +654,37 @@ static inline void end_concurrent_atomic_buffer_read(SPADFS *fs,
 	unlock_buffer(bh);
 }
 
+/*
+ * XOR fold of [p, p + len): the legacy 8-bit checksum that apages and dnodes
+ * still use (fsck and mkfs compute the same thing with __byte_sum). Takes any
+ * length so callers can fold a structure that spans several sectors chunk by
+ * chunk -- XOR is associative, so the per-chunk folds XOR to the whole.
+ */
+static inline u8 spadfs_xor_bytes(const void *p, unsigned len)
+{
+	const u8 *b = p;
+	u8 s = 0;
+
+	if (likely(len) &&
+	    likely(!(((unsigned long)b | len) & (sizeof(unsigned long) - 1))))
+		return __byte_sum((void *)b, len);
+	while (len--)
+		s ^= *b++;
+	return s;
+}
+
+/*
+ * Set on a dnode's header buffer once the active version's entry array has
+ * passed its checksum. Verifying on every lookup would cost a pass over the
+ * whole array (12 KiB on a 32 KiB page) per directory level; the kernel keeps
+ * the checksum current itself, so one check per load from disk is enough. A
+ * buffer that is evicted and read again comes back without the bit.
+ */
+enum {
+	BH_SpadfsVerified = BH_PrivateStart,
+};
+BUFFER_FNS(SpadfsVerified, spadfs_verified)
+
 #define check_checksums(fs)	\
 		(!((fs)->flags_compat_fsck & FLAG_COMPAT_FSCK_NO_CHECKSUMS))
 #define make_checksums(fs)	\
@@ -799,6 +830,8 @@ void spadfs_set_new_hint(SPADFNODE *f, struct alloc *al);
 void spadfs_get_dir_hint(SPADFNODE *f, u16 *small, u16 *big);
 int spadfs_write_file(SPADFNODE *f, int datasync, int *optimized, struct buffer_head **bhp);
 int spadfs_write_directory(SPADFNODE *f);
+
+int spadfs_verify_dnode(SPADFS *fs, sector_t dno, struct buffer_head *bh, struct dnode_page *d);
 
 int spadfs_refile_fixed_fnode(SPADFNODE *file, u8 *new_ea, unsigned new_ea_size);
 int spadfs_refile_fnode(SPADFNODE *dir, const struct qstr *qstr, SPADFNODE *file, u8 *new_ea, unsigned new_ea_size);

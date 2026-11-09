@@ -300,14 +300,21 @@ error:
 	return 0;
 }
 
-static int read_apage_buffers(SPADFS *fs, struct apage_mapping *mapping, sector_t sec)
+/*
+ * *fresh is set when the buffers were (re)attached from the buffer cache
+ * rather than reused from this apage cache, i.e. whenever their contents may
+ * have come from disk since the kernel last sealed them.
+ */
+static int read_apage_buffers(SPADFS *fs, struct apage_mapping *mapping, sector_t sec, int *fresh)
 {
 	fs->mapped_apage_buffers++;
 	if (likely(mapping->map[0].entry != NULL)) {
 		list_del(&mapping->list);
 		list_add_tail(&mapping->list, &fs->apage_lru);
+		*fresh = 0;
 		return 0;
 	}
+	*fresh = 1;
 	return internal_read_apage_buffers(fs, mapping, sec);
 }
 
@@ -324,6 +331,42 @@ static void copy_apage(SPADFS *fs, APAGE_MAP *dst, APAGE_MAP *src)
 	spadfs_memcpy((char *)dst[0].entry + offset, (char *)src[0].entry + offset, size - offset);
 	for (i = 1; i < n; i++)
 		spadfs_memcpy(dst[i].entry, src[i].entry, size);
+}
+
+/*
+ * apage checksums.
+ *
+ * Each half of an apage carries an 8-bit checksum in its subhead, over the
+ * half from the subhead to its end -- the per-half magic/cc/txc in front of
+ * the subhead are excluded, as they change without the half changing:
+ *
+ *   xor(half[8 .. half_size)) == CHECKSUM_BASE
+ *
+ * valid when flags & APAGE_CHECKSUM_VALID. mkspadfs seals with this formula
+ * and spadfsck verifies and rewrites with it (sckapage.c).
+ *
+ * The kernel used to clear the flag on its first change to a half and never
+ * set it again. Now:
+ *   - unmap_apage seals every half it was told was modified, so a half the
+ *     kernel has written is always covered;
+ *   - map_apage verifies the active half whenever its buffers were freshly
+ *     attached, which is every time the contents may have come from disk.
+ *     The inactive half is not checked: a crash may leave it torn, and fsck
+ *     ignores it too.
+ */
+static u8 apage_sum(SPADFS *fs, APAGE_MAP *map)
+{
+	unsigned i;
+	unsigned size = 512U << fs->sectors_per_buffer_bits;
+	const unsigned offset = sizeof(struct apage_head) - sizeof(struct apage_subhead);
+	u8 sum;
+
+	if (unlikely(fs->apage_size < size))
+		size = fs->apage_size;
+	sum = spadfs_xor_bytes((char *)map[0].entry + offset, size - offset);
+	for (i = 1; i < fs->n_apage_mappings; i++)
+		sum ^= spadfs_xor_bytes(map[i].entry, size);
+	return sum;
 }
 
 static void mark_apage_dirty(SPADFS *fs, APAGE_MAP *map)
@@ -364,6 +407,7 @@ static APAGE_MAP *map_apage(SPADFS *fs, unsigned ap, int flags,
 	sector_t sec;
 	struct apage_head *a;
 	struct apage_head *aa;
+	int fresh[2];
 	sec = SPAD2CPU64_LV(&fs->apage_index[ap].apage);
 	if (unlikely((unsigned)sec & ((1U << fs->sectors_per_page_bits) - 1))) {
 		spadfs_error(fs, TXFLAGS_FS_ERROR,
@@ -372,11 +416,12 @@ static APAGE_MAP *map_apage(SPADFS *fs, unsigned ap, int flags,
 		return ERR_PTR(-EFSERROR);
 	}
 	info = &fs->apage_info[ap];
-	if (unlikely(r = read_apage_buffers(fs, &info->mapping[0], sec))) {
+	if (unlikely(r = read_apage_buffers(fs, &info->mapping[0], sec, &fresh[0]))) {
 		return ERR_PTR(r);
 	}
 	if (unlikely(r = read_apage_buffers(fs, &info->mapping[1],
-			       sec + (1U << (fs->sectors_per_page_bits - 1))))) {
+			       sec + (1U << (fs->sectors_per_page_bits - 1)),
+			       &fresh[1]))) {
 		free_apage_buffers(fs, info->mapping[0].map);
 		return ERR_PTR(r);
 	}
@@ -399,6 +444,26 @@ static APAGE_MAP *map_apage(SPADFS *fs, unsigned ap, int flags,
 
 	if (unlikely(flags == MAP_NEW)) {
 		goto read_ok;
+	}
+
+	if (unlikely(fresh[idx]) && likely(check_checksums(fs)) &&
+	    get_head(info->mapping[idx].map)->s.u.l.flags & APAGE_CHECKSUM_VALID &&
+	    unlikely(apage_sum(fs, info->mapping[idx].map) != CHECKSUM_BASE)) {
+		spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+			"bad checksum on apage %Lx (half %u): %02x",
+			(unsigned long long)sec, idx,
+			apage_sum(fs, info->mapping[idx].map) ^ CHECKSUM_BASE);
+		free_apage_buffers(fs, info->mapping[0].map);
+		free_apage_buffers(fs, info->mapping[1].map);
+		/*
+		 * Drop it from the apage cache too: a cached mapping is not
+		 * fresh, so the next map_apage would use it unchecked. The
+		 * frees above may already have pruned it (entry is then NULL);
+		 * freeing it twice would release its buffers twice.
+		 */
+		if (info->mapping[idx].map[0].entry != NULL)
+			internal_free_apage_buffers(fs, &info->mapping[idx]);
+		return ERR_PTR(-EFSERROR);
 	}
 
 	if (invalid_flags(fs, get_head(info->mapping[idx].map)->s.u.l.flags)) {
@@ -462,7 +527,20 @@ static void unmap_apage(SPADFS *fs, APAGE_MAP *map, int modified)
 {
 	BUG_ON(!atomic_read(&map[0].bh->b_count));
 	if (modified) {
-		get_head(map)->s.u.l.flags &= ~APAGE_CHECKSUM_VALID;
+		struct apage_head *head = get_head(map);
+
+		if (likely(make_checksums(fs))) {
+			/*
+			 * The checksum byte lies inside the folded range, so
+			 * folding the current sum into it makes the whole come
+			 * out at CHECKSUM_BASE. The flag is set first: it is in
+			 * the range as well.
+			 */
+			head->s.u.l.flags |= APAGE_CHECKSUM_VALID;
+			head->s.u.l.checksum ^= CHECKSUM_BASE ^ apage_sum(fs, map);
+		} else {
+			head->s.u.l.flags &= ~APAGE_CHECKSUM_VALID;
+		}
 		mark_apage_dirty(fs, map);
 	}
 	free_apage_buffers(fs, map);

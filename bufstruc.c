@@ -94,6 +94,20 @@ struct fnode_block *spadfs_read_fnode_block(SPADFS *fs, sector_t secno,
 				msg);
 			goto rel_err;
 		}
+		/*
+		 * Once per load of the header buffer: the kernel keeps the
+		 * checksum current from then on (dir.c), so re-checking every
+		 * lookup would only cost a pass over the entry array.
+		 */
+		if (likely(check_checksums(fs)) &&
+		    unlikely(!buffer_spadfs_verified(*bhp))) {
+			int r = spadfs_verify_dnode(fs, secno, *bhp,
+						    (struct dnode_page *)fnode_block);
+			if (unlikely(r)) {
+				spadfs_brelse(fs, *bhp);
+				return ERR_PTR(r);
+			}
+		}
 		return fnode_block;
 	}
 	if (likely(SPAD2CPU32_LV(&fnode_block->magic) ==

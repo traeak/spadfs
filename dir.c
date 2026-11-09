@@ -31,11 +31,116 @@ void really_do_fnode_block_checksum(struct fnode_block *fnode_block)
 				 __byte_sum(fnode_block, FNODE_BLOCK_SIZE);
 }
 
+/*
+ * dnode checksums.
+ *
+ * Each of the two versions of a dnode page has its own 8-bit checksum in the
+ * header, over that version's entry array only:
+ *
+ *   xor(entries[version]) == CHECKSUM_BASE ^ checksum[version]
+ *
+ * valid when flags[version] & DNODE_CHECKSUM_VALID. The formula is the one
+ * spadfsck verifies and repairs with (sckdir.c), so all three readers agree.
+ *
+ * The kernel used to clear the flag whenever it touched a version and never
+ * set it, so only dnodes that fsck had rewritten were ever covered. Now it
+ * keeps the active version sealed:
+ *
+ *   - a new dnode is sealed once its entries are initialised
+ *   - begin_modify seals a version it is about to change if it was not
+ *     sealed (a volume used with no_checksums, or by an older module), and
+ *     when it copies one version into the other it checks the source before
+ *     sealing the copy, so a damaged source is reported, not re-blessed
+ *   - every entry write folds the change into the checksum (XOR is linear:
+ *     new = old ^ xor(old bytes) ^ xor(new bytes)), so a lookup-heavy
+ *     directory never pays for a full pass
+ *
+ * Reads verify the active version once per load of the header buffer
+ * (spadfs_verify_dnode, BH_SpadfsVerified).
+ */
+
+/* xor of the entry array of one version, across every sector it spans */
+static int spadfs_dnode_data_sum(SPADFS *fs, sector_t dno, unsigned version,
+				 u8 *sum)
+{
+	unsigned off = DNODE_ENTRY_OFFSET + version * fs->dnode_data_size;
+	unsigned remaining = fs->dnode_data_size;
+	u8 s = 0;
+
+	while (remaining) {
+		struct buffer_head *bh;
+		unsigned len = 512 - (off & 511);
+		const u8 *data;
+
+		if (len > remaining)
+			len = remaining;
+		data = spadfs_read_sector(fs, dno + (off >> 9), &bh, 0,
+					  "spadfs_dnode_data_sum");
+		if (unlikely(IS_ERR(data)))
+			return PTR_ERR(data);
+		s ^= spadfs_xor_bytes(data + (off & 511), len);
+		spadfs_brelse(fs, bh);
+		off += len;
+		remaining -= len;
+	}
+	*sum = s;
+	return 0;
+}
+
+/* store the checksum of one version, given the xor of its entries */
+static int spadfs_dnode_set_checksum(SPADFS *fs, sector_t dno,
+				     unsigned version, u8 sum)
+{
+	struct buffer_head *bh;
+	struct dnode_page *d;
+
+	d = spadfs_read_sector(fs, dno, &bh, 0, "spadfs_dnode_set_checksum");
+	if (unlikely(IS_ERR(d)))
+		return PTR_ERR(d);
+	start_atomic_buffer_modify(fs, bh);
+	d->checksum[version] = sum ^ CHECKSUM_BASE;
+	d->flags[version] |= DNODE_CHECKSUM_VALID;
+	end_atomic_buffer_modify(fs, bh);
+	spadfs_brelse(fs, bh);
+	return 0;
+}
+
+static int spadfs_dnode_seal(SPADFS *fs, sector_t dno, unsigned version)
+{
+	u8 sum;
+	int r = spadfs_dnode_data_sum(fs, dno, version, &sum);
+
+	if (unlikely(r))
+		return r;
+	return spadfs_dnode_set_checksum(fs, dno, version, sum);
+}
+
+/* fold an entry write into a sealed version's checksum */
+static int spadfs_dnode_checksum_delta(SPADFS *fs, sector_t dno,
+				       unsigned version, u8 delta)
+{
+	struct buffer_head *bh;
+	struct dnode_page *d;
+
+	if (unlikely(!make_checksums(fs)))
+		return 0;
+	d = spadfs_read_sector(fs, dno, &bh, 0, "spadfs_dnode_checksum_delta");
+	if (unlikely(IS_ERR(d)))
+		return PTR_ERR(d);
+	if (d->flags[version] & DNODE_CHECKSUM_VALID) {
+		d->checksum[version] ^= delta;
+		mark_buffer_dirty(bh);
+	}
+	spadfs_brelse(fs, bh);
+	return 0;
+}
+
 static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
 			       unsigned i, sector_t *result, int wr)
 {
 	struct buffer_head *bh;
 	char *data;
+	u8 delta = 0;	/* xor of the entry bytes before and after a write */
 	i = (i * DNODE_PAGE_ENTRY_SIZE) + DNODE_ENTRY_OFFSET;
 	if (version)
 		i += fs->dnode_data_size;
@@ -53,12 +158,14 @@ static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
 				((struct dnode_page_entry *)data)->b1,
 				((struct dnode_page_entry *)data)->b2);
 		} else {
+			delta = spadfs_xor_bytes(data, DNODE_PAGE_ENTRY_SIZE);
 			((struct dnode_page_entry *)data)->b0 =
 							MAKE_PART_30(*result);
 			((struct dnode_page_entry *)data)->b1 =
 							MAKE_PART_31(*result);
 			((struct dnode_page_entry *)data)->b2 =
 							MAKE_PART_32(*result);
+			delta ^= spadfs_xor_bytes(data, DNODE_PAGE_ENTRY_SIZE);
 		}
 	} else {
 		struct dnode_page_entry dp;
@@ -68,7 +175,9 @@ static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
 			dp.b0 = MAKE_PART_30(*result);
 			dp.b1 = MAKE_PART_31(*result);
 			dp.b2 = MAKE_PART_32(*result);
+			delta ^= spadfs_xor_bytes(data, 512 - (i & 511));
 			spadfs_memcpy(data, &dp, 512 - (i & 511));
+			delta ^= spadfs_xor_bytes(data, 512 - (i & 511));
 			mark_buffer_dirty(bh);
 		}
 		spadfs_brelse(fs, bh);
@@ -82,15 +191,22 @@ static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
 			spadfs_memcpy((char *)&dp + (512 - (i & 511)), data,
 			       DNODE_PAGE_ENTRY_SIZE - (512 - (i & 511)));
 			*result = MAKE_D_OFF3(dp.b0, dp.b1, dp.b2);
-		} else
-			spadfs_memcpy(data, (char *)&dp + (512 - (i & 511)),
-			       DNODE_PAGE_ENTRY_SIZE - (512 - (i & 511)));
+		} else {
+			unsigned rest = DNODE_PAGE_ENTRY_SIZE - (512 - (i & 511));
+
+			delta ^= spadfs_xor_bytes(data, rest);
+			spadfs_memcpy(data, (char *)&dp + (512 - (i & 511)), rest);
+			delta ^= spadfs_xor_bytes(data, rest);
+		}
 	}
 
 	if (wr)
 		mark_buffer_dirty(bh);
 
 	spadfs_brelse(fs, bh);
+
+	if (wr && delta)
+		return spadfs_dnode_checksum_delta(fs, secno, version, delta);
 	return 0;
 }
 
@@ -111,6 +227,34 @@ static int dnode_version(SPADFS *fs, struct dnode_page *d)
 	return !CC_VALID(fs, &d->cc, &d->txc);
 }
 
+/*
+ * Called by spadfs_read_fnode_block the first time a dnode header buffer is
+ * read. Only the active version is checked: the other one may legitimately
+ * be torn by a crash, and fsck ignores it too.
+ */
+int spadfs_verify_dnode(SPADFS *fs, sector_t dno, struct buffer_head *bh,
+			struct dnode_page *d)
+{
+	unsigned version = dnode_version(fs, d);
+
+	if (d->flags[version] & DNODE_CHECKSUM_VALID) {
+		u8 sum;
+		int r = spadfs_dnode_data_sum(fs, dno, version, &sum);
+
+		if (unlikely(r))
+			return r;
+		if (unlikely(sum != (CHECKSUM_BASE ^ d->checksum[version]))) {
+			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+				"bad checksum on dnode %Lx (version %u): stored %02x computed %02x",
+				(unsigned long long)dno, version,
+				d->checksum[version], sum ^ CHECKSUM_BASE);
+			return -EFSERROR;
+		}
+	}
+	set_buffer_spadfs_verified(bh);
+	return 0;
+}
+
 static int spadfs_begin_modify_dnode(SPADFS *fs, sector_t dno)
 {
 	int version;
@@ -125,8 +269,17 @@ static int spadfs_begin_modify_dnode(SPADFS *fs, sector_t dno)
 	version = dnode_version(fs, d);
 
 	if (CC_CURRENT(fs, &d->cc, &d->txc)) {
-		d->flags[version] &= ~DNODE_CHECKSUM_VALID;
-		mark_buffer_dirty(bh);
+		if (unlikely(!make_checksums(fs))) {
+			d->flags[version] &= ~DNODE_CHECKSUM_VALID;
+			mark_buffer_dirty(bh);
+		} else if (unlikely(!(d->flags[version] & DNODE_CHECKSUM_VALID))) {
+			/* not sealed yet; entry writes keep it current after this */
+			int r;
+
+			spadfs_brelse(fs, bh);
+			r = spadfs_dnode_seal(fs, dno, version);
+			return unlikely(r) ? r : version;
+		}
 		spadfs_brelse(fs, bh);
 		return version;
 	} else {
@@ -134,6 +287,11 @@ static int spadfs_begin_modify_dnode(SPADFS *fs, sector_t dno)
 		char *datafrom, *datato;
 		struct buffer_head *bhfrom, *bhto;
 		unsigned remaining, len;
+		/* the source, checked as it is copied (see the end) */
+		u8 src_sealed = d->flags[version] & DNODE_CHECKSUM_VALID;
+		u8 src_checksum = d->checksum[version];
+		u8 sum = 0;
+		int r;
 
 		start_atomic_buffer_modify(fs, bh);
 		d->flags[version ^ 1] &= ~DNODE_CHECKSUM_VALID;
@@ -165,6 +323,7 @@ copy_again:
 			len = 512 - (to & 511);
 		if (unlikely(remaining < len))
 			len = remaining;
+		sum ^= spadfs_xor_bytes(datafrom, len);
 		spadfs_memcpy(datato, datafrom, len);
 		datafrom += len;
 		datato += len;
@@ -197,6 +356,24 @@ copy_again:
 		spadfs_brelse(fs, bhfrom);
 		mark_buffer_dirty(bhto);
 		spadfs_brelse(fs, bhto);
+
+		if (likely(make_checksums(fs))) {
+			/*
+			 * Never seal a copy of damaged entries: that would turn
+			 * detectable corruption into a valid-looking dnode.
+			 */
+			if (src_sealed &&
+			    unlikely(sum != (CHECKSUM_BASE ^ src_checksum))) {
+				spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+					"bad checksum on dnode %Lx (version %u) while copying it: stored %02x computed %02x",
+					(unsigned long long)dno, version,
+					src_checksum, sum ^ CHECKSUM_BASE);
+				return -EFSERROR;
+			}
+			r = spadfs_dnode_set_checksum(fs, dno, version ^ 1, sum);
+			if (unlikely(r))
+				return r;
+		}
 		return version ^ 1;
 	}
 }
@@ -439,6 +616,16 @@ static int spadfs_alloc_dnode_page(SPADFNODE *fn, sector_t hint,
 	}
 	for (i = 0; i < 1U << fs->dnode_hash_bits; i++) {
 		r = spadfs_write_dnode(fs, al.sector, 0, i, ptr_init);
+		if (unlikely(r))
+			goto free_return_r;
+	}
+	/*
+	 * Version 0 is the active one (cc/txc above are current). Seal it in
+	 * one pass now that every entry is written; the entry writes above
+	 * skipped the incremental update because the flag was still clear.
+	 */
+	if (likely(make_checksums(fs))) {
+		r = spadfs_dnode_seal(fs, al.sector, 0);
 		if (unlikely(r))
 			goto free_return_r;
 	}

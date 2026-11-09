@@ -44,6 +44,9 @@ jobs:
       - name: dm-log-writes replayer (crash-state enumeration and oracle)
         run: python3 tests/logwrites_test.py
 
+      - name: apage/dnode checksum scanner
+        run: python3 tests/metasum_test.py
+
       - name: No shell test pipes into grep -q (wrong under pipefail)
         run: bash tests/lint_pipefail.sh
 
