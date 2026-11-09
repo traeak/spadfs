@@ -122,6 +122,38 @@ int main(void)
 	copy[SPADFS_META_CRC_POS] ^= 0xFF;
 	check_bool("trailer tamper detected", spadfs_meta_verify(copy) != 0);
 
+	/*
+	 * The fnode_block's CRC sits inside the unit (header offset 24), not at
+	 * its end. The CRC must equal a plain CRC-32C over the unit with the
+	 * 4-byte field cut out, and must cover bytes on both sides of it.
+	 */
+	printf("\nInner CRC field (fnode_block header)\n");
+	{
+		unsigned char cut[SPADFS_META_UNIT_SIZE - 4];
+		unsigned pos = 24;
+
+		memcpy(copy, unit, sizeof copy);
+		spadfs_meta_inner_seal(copy, pos);
+		memcpy(cut, copy, pos);
+		memcpy(cut + pos, copy + pos + 4, sizeof cut - pos);
+		check("inner CRC == CRC-32C of the unit without the field",
+		      spadfs_meta_inner_stored_crc(copy, pos),
+		      spadfs_crc32c_std(cut, sizeof cut));
+		check_bool("inner-sealed unit verifies",
+			   spadfs_meta_inner_verify(copy, pos) == 0);
+		copy[3] ^= 0x01;
+		check_bool("damage before the field detected",
+			   spadfs_meta_inner_verify(copy, pos) != 0);
+		copy[3] ^= 0x01;
+		copy[511] ^= 0x80;
+		check_bool("damage after the field detected (byte 511)",
+			   spadfs_meta_inner_verify(copy, pos) != 0);
+		copy[511] ^= 0x80;
+		copy[pos + 1] ^= 0x10;
+		check_bool("field tamper detected",
+			   spadfs_meta_inner_verify(copy, pos) != 0);
+	}
+
 	printf("\n%s\n", failures ? "FAILURES" : "ALL PASS");
 	if (failures)
 		printf("%d check(s) failed\n", failures);

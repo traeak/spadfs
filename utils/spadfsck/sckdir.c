@@ -310,7 +310,8 @@ do {									\
 #define update_block							\
 do {									\
 	f->flags |= FNODE_BLOCK_CHECKSUM_VALID;				\
-	f->checksum ^= CHECKSUM_BASE ^ __byte_sum(f, FNODE_BLOCK_SIZE);	\
+	f->checksum = 0;						\
+	spadfs_meta_inner_seal(f, FNODE_BLOCK_CRC_POS);		\
 	if (__unlikely(write_buffer(blk, 1, f))) goto read_err;		\
 	reread_block;							\
 } while (0)
@@ -319,8 +320,8 @@ do {									\
 		log_printf(1, "THE DEVICE IS UNRELIABLE, MAGIC HAS BEEN CORRECT BEFORE");
 		return 1;
 	}
-	if (__unlikely(__byte_sum(f, FNODE_BLOCK_SIZE) != CHECKSUM_BASE)) {
-		log_printf(0, "%s: BAD CHECKSUM ON FNODE BLOCK %"blk_format"X: %02X", get_filename(d), blk, __byte_sum(f, FNODE_BLOCK_SIZE) ^ CHECKSUM_BASE);
+	if (__unlikely(spadfs_meta_inner_verify(f, FNODE_BLOCK_CRC_POS))) {
+		log_printf(0, "%s: BAD CHECKSUM ON FNODE BLOCK %"blk_format"X: stored %08X computed %08X", get_filename(d), blk, spadfs_meta_inner_stored_crc(f, FNODE_BLOCK_CRC_POS), spadfs_meta_inner_computed_crc(f, FNODE_BLOCK_CRC_POS));
 		if (query(qprefix 0, "FIX?")) {
 			update_block;
 		}
@@ -1014,7 +1015,8 @@ static void seal_dir_fnode_block(struct fnode_block *f, blk_t blk)
 		spadfs_meta_seal(f);
 	} else {
 		f->flags |= FNODE_BLOCK_CHECKSUM_VALID;
-		f->checksum ^= CHECKSUM_BASE ^ __byte_sum(f, FNODE_BLOCK_SIZE);
+		f->checksum = 0;
+		spadfs_meta_inner_seal(f, FNODE_BLOCK_CRC_POS);
 	}
 }
 

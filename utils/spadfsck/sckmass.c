@@ -523,7 +523,8 @@ static int recover(BLOCK *bl, int *done)
 			log_printf(0, "BLOCK AT %"blk_format"X IS LOST INNER DIRECTORY BLOCK", bl->b);
 			if (query(qprefix 0, "FIX?")) {
 				f->flags |= FNODE_BLOCK_CHECKSUM_VALID;
-				f->checksum ^= CHECKSUM_BASE ^ __byte_sum(f, FNODE_BLOCK_SIZE);
+				f->checksum = 0;
+				spadfs_meta_inner_seal(f, FNODE_BLOCK_CRC_POS);
 				write_buffer(bl->b, 1, f);
 			} else {
 				return 0;

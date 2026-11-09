@@ -60,7 +60,8 @@ static void make_fnode_block(struct fnode_block *f, blk_t block, unsigned dirblk
 		CPU2SPAD16_LV(&fn->next, (FNODE_MAX_SIZE & FNODE_NEXT_SIZE) | FNODE_NEXT_FREE);
 		CPU2SPAD16_LV(&fn->cc, 0);
 		CPU2SPAD32_LV(&fn->txc, 0);
-		f->checksum ^= CHECKSUM_BASE ^ __byte_sum(f, FNODE_BLOCK_SIZE);
+		f->checksum = 0;
+		spadfs_meta_inner_seal(f, FNODE_BLOCK_CRC_POS);
 	}
 }
 
@@ -209,7 +210,8 @@ static int add_entry(blk_t blk, blk_t dir_blk, unsigned dir_offset, const struct
 #define update_block							\
 do {									\
 	f->flags |= FNODE_BLOCK_CHECKSUM_VALID;				\
-	f->checksum ^= CHECKSUM_BASE ^ __byte_sum(f, FNODE_BLOCK_SIZE);	\
+	f->checksum = 0;						\
+	spadfs_meta_inner_seal(f, FNODE_BLOCK_CRC_POS);		\
 	write_buffer(blk, 1, f);					\
 	if (__unlikely(!(f = read_buffer(blk, 1, 0)))) goto read_err;	\
 } while (0)

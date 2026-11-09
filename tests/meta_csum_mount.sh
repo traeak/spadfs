@@ -76,13 +76,28 @@ kmsg_since() { klog_since; }
 
 metasum() { python3 "$TESTS_DIR/metasum.py" "$@"; }
 
+# spadfsck's findings without its progress output (which redraws with \r and
+# escape codes, so a plain grep -v '^checking' keeps only noise)
+fsck_errors() {
+	tr '\r' '\n' <"$1" | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' |
+		grep -vE '^[0-9]+%|^ *\(?[0-9]+ of [0-9]+\)?|^checking|^done|^ *$' | head -20
+}
+
+# keep a failing image for unprivileged analysis, owned by the invoking user
+FAILDIR=/tmp/spadfs-failures
+keep_image() {
+	mkdir -p "$FAILDIR" && cp "$1" "$FAILDIR/$2.img" &&
+		chown -R "${SUDO_UID:-0}:${SUDO_GID:-0}" "$FAILDIR" &&
+		echo "        image kept: $FAILDIR/$2.img"
+}
+
 # Patch an image in place: clear a CHECKSUM_VALID bit and damage the payload,
 # keeping every other check satisfied so only the cleared bit stands between
 # the damage and a reader that trusts it.
 #   dnode     clear the active version's flag (outside the folded range) and
 #             flip a byte of its entries
-#   rootdir   clear the root directory's first fnode block flag, rebalance
-#             the XOR fold, and flip a payload byte
+#   rootdir   clear the root directory's first fnode block flag, reseal its
+#             header CRC, and flip a payload byte
 #   compat    set bit 0 of flags_compat_fsck and reseal the superblock
 patch_flag() {
 	python3 - "$1" "$2" "$TESTS_DIR" <<'PY'
@@ -90,7 +105,7 @@ import sys
 img, kind, tests = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, tests)
 import metasum, sbinfo
-from corrupt import restripe_trailer
+from corrupt import restripe_trailer, restripe_inner_crc
 
 def flip(f, off, mask):
     f.seek(off); b = f.read(1)[0]; f.seek(off); f.write(bytes([b ^ mask]))
@@ -110,9 +125,11 @@ with open(img, "r+b") as f:
             sys.exit(1)
     elif kind == "rootdir":
         off = (info["root"] + (1 << info["sectors_per_block_bits"])) * 512
-        flip(f, off + 4, 0x01)
-        flip(f, off + 5, 0x01)
-        flip(f, off + 40, 0x20)
+        f.seek(off); u = bytearray(f.read(512))
+        u[4] &= ~0x01
+        restripe_inner_crc(u)
+        u[48] ^= 0x20
+        f.seek(off); f.write(u)
     elif kind == "compat":
         off = sbinfo.SUPERBLOCK_SECTOR * 512
         f.seek(off); u = bytearray(f.read(512))
@@ -218,9 +235,12 @@ for bs in 512 4096; do
 	[ "$(field "$IMG" dnode_bad)" = 0 ] && [ "$(field "$IMG" dnode_unsealed)" = 0 ] \
 		&& ok "bs$bs: every dnode is sealed and matches" \
 		|| bad "bs$bs: dnodes unsealed or mismatched" "$(metasum "$IMG" | grep dnode_)"
-	"$FSCK" -n -f "$IMG" >"$WORKDIR/fsck.txt" 2>&1 \
-		&& ok "bs$bs: spadfsck agrees with every kernel-written checksum" \
-		|| bad "bs$bs: spadfsck rejects the kernel-written volume" "$(grep -v '^checking' "$WORKDIR/fsck.txt" | head -5)"
+	if "$FSCK" -n -f "$IMG" >"$WORKDIR/fsck.txt" 2>&1; then
+		ok "bs$bs: spadfsck agrees with every kernel-written checksum"
+	else
+		bad "bs$bs: spadfsck rejects the kernel-written volume" "$(fsck_errors "$WORKDIR/fsck.txt")"
+		keep_image "$IMG" "bs$bs-kernel-written"
+	fi
 
 	banner "block size $bs: damaged dnode"
 	cp "$IMG" "$WORKDIR/dn.img"

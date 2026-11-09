@@ -38,8 +38,8 @@
 #
 #   superblock, txblock, root_fnode  crc32c trailer   scksuper.c:220/369, sckfxfn.c:76
 #   cct, cct_live                  side CRC region   sckcct.c:158
-#   root_dir                       legacy __byte_sum  sckdir.c:322  (Cat 2 blocker:
-#                                                   fnode_block cannot take a trailer)
+#   root_dir                       header crc32c      sckdir.c  (fnode_block: CRC at
+#                                                   header offset 24; no trailer)
 #   apage_index                    NONE              no checksum call site exists
 #
 # apage_index cannot be isolated -- with no checksum there is nothing to
@@ -121,7 +121,7 @@ protection_of() {
 	case "$1" in
 		superblock|txblock|root_fnode) printf 'crc32c trailer' ;;
 		cct|cct_live)                  printf 'side CRC region' ;;
-		root_dir)                    printf 'legacy __byte_sum' ;;
+		root_dir)                    printf 'header crc32c' ;;
 		*)                           printf 'none' ;;
 	esac
 }

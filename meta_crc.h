@@ -11,11 +11,11 @@
  *
  * Why a positional trailer rather than a widened per-struct field:
  *
- *   - No existing field offset moves. SIZEOF_FNODE_BLOCK stays 24, so the
- *     make_dir_off_t / dir_off_t_pos bit-packing that encodes directory
- *     positions on disk is unaffected. Widening the in-struct __u8 checksum
- *     would have shifted every subsequent field and required re-deriving those
- *     macros in lockstep, with nothing in the tree checking that it was done.
+ *   - No existing field offset moves. Widening a per-struct __u8 checksum
+ *     shifts every later field. (The fnode_block is the exception: its
+ *     fnode chain must tile to byte 512, so it cannot take a trailer, and its
+ *     header grew from 24 to 32 bytes to hold a CRC -- see the inner-field
+ *     helpers at the end of this file.)
  *
  *   - The checksum needs no field at all, so it covers structures that have
  *     none. The crash-count table previously had no checksum anywhere
@@ -25,7 +25,7 @@
  *   - One helper pair serves every unit, instead of eight structs each keeping
  *     its own "flags & checksum must match" coupling.
  *
- * Cost: 4 bytes of payload per 512-byte unit (FNODE_MAX_SIZE 488 -> 484).
+ * Cost: 4 bytes of payload per 512-byte unit.
  *
  * The CRC is computed over raw bytes and stored little-endian, so it is
  * independent of the volume's byte_sex. That is deliberate: endianness is a
@@ -57,6 +57,12 @@ static inline __u32 spadfs_crc32c_std(const void *buf, size_t len)
 	return ~crc32c(~0U, buf, len);
 }
 
+/* Raw, chainable: no inversion at either end (utils/crc32c.c matches). */
+static inline __u32 spadfs_crc32c_raw(__u32 crc, const void *buf, size_t len)
+{
+	return crc32c(crc, buf, len);
+}
+
 /*
  * Low-level trailer accessors. These take a pointer to the 4-byte FIELD
  * itself, not to the start of the unit -- the offset lives only in
@@ -84,6 +90,7 @@ static inline __u32 spadfs_meta_get_crc(const __u8 *field)
 #include <stdint.h>
 
 uint32_t spadfs_crc32c_std(const void *buf, size_t len);
+uint32_t spadfs_crc32c_raw(uint32_t crc, const void *buf, size_t len);
 
 /* Same field-pointer convention as the kernel inlines above. */
 void     spadfs_meta_put_crc(uint8_t *field, uint32_t crc);
@@ -144,6 +151,44 @@ static inline int spadfs_meta_verify(const void *unit)
 
 	return spadfs_meta_get_crc(u + SPADFS_META_CRC_POS) ==
 		       spadfs_crc32c_std(u, SPADFS_META_COVER) ? 0 : -1;
+}
+
+/*
+ * A CRC field INSIDE the unit rather than at its end, for the fnode_block:
+ * its chain of fnodes must tile to byte 512, so the CRC lives in the header.
+ * The CRC-32C covers every byte of the unit except the 4-byte field itself,
+ * i.e. [0, pos) and [pos + 4, 512), in that order -- the same as a CRC over
+ * the unit with the field removed. Standard convention (init ~0, final
+ * invert), stored little-endian like the trailer.
+ */
+static inline spadfs_crc_t spadfs_meta_inner_computed_crc(const void *unit,
+							  unsigned pos)
+{
+	const unsigned char *u = (const unsigned char *)unit;
+	spadfs_crc_t crc = spadfs_crc32c_raw(~0U, u, pos);
+
+	crc = spadfs_crc32c_raw(crc, u + pos + SPADFS_META_CRC_BYTES,
+				SPADFS_META_UNIT_SIZE - pos - SPADFS_META_CRC_BYTES);
+	return ~crc;
+}
+
+static inline spadfs_crc_t spadfs_meta_inner_stored_crc(const void *unit,
+							unsigned pos)
+{
+	return spadfs_meta_get_crc((const unsigned char *)unit + pos);
+}
+
+static inline void spadfs_meta_inner_seal(void *unit, unsigned pos)
+{
+	spadfs_meta_put_crc((unsigned char *)unit + pos,
+			    spadfs_meta_inner_computed_crc(unit, pos));
+}
+
+/* Returns 0 when intact, non-zero when corrupt. */
+static inline int spadfs_meta_inner_verify(const void *unit, unsigned pos)
+{
+	return spadfs_meta_inner_stored_crc(unit, pos) ==
+		       spadfs_meta_inner_computed_crc(unit, pos) ? 0 : -1;
 }
 
 #endif

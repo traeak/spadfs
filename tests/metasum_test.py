@@ -22,7 +22,7 @@ REPO = os.path.dirname(TESTS)
 sys.path.insert(0, TESTS)
 import metasum  # noqa: E402
 import sbinfo  # noqa: E402
-from corrupt import restripe_trailer  # noqa: E402
+from corrupt import restripe_trailer, restripe_inner_crc  # noqa: E402
 
 FSCK = os.path.join(REPO, "spadfsck2")
 PASS = FAIL = 0
@@ -100,21 +100,58 @@ def main():
         info = sbinfo.read_super(img)
         blk = 1 << info["sectors_per_block_bits"]
 
-        # The root directory's first fnode block (XOR fold). Clearing the
-        # flag alone would change the fold, so put the fold right afterwards:
-        # what is left is a block whose only fault is the cleared bit -- it
-        # must still be checked, and so the payload damage must be caught.
+        # The root directory's first fnode block (header CRC). Clear the
+        # flag and reseal: what is left is a block whose only fault is the
+        # cleared bit -- it must still be checked, so payload damage made
+        # afterwards must be caught.
         fb = os.path.join(tmp, "fblk.img")
         shutil.copyfile(img, fb)
         off = (info["root"] + blk) * 512
         rc, out = fsck_out(fb)
         ok(rc == 0, "baseline: the copied volume is clean", out[-300:])
-        patch(fb, off + 4, lambda x: x & ~0x01)       # FNODE_BLOCK_CHECKSUM_VALID
-        patch(fb, off + 5, lambda x: x ^ 0x01)        # the fold, rebalanced
-        patch(fb, off + 40, lambda x: x ^ 0x20)       # payload damage
+        with open(fb, "r+b") as f:
+            f.seek(off)
+            u = bytearray(f.read(512))
+            u[4] &= ~0x01                             # FNODE_BLOCK_CHECKSUM_VALID
+            restripe_inner_crc(u)
+            f.seek(off)
+            f.write(u)
+        rc, out = fsck_out(fb)
+        ok(rc == 0, "an fnode block resealed with its flag clear is clean", out[-300:])
+        patch(fb, off + 48, lambda x: x ^ 0x20)       # payload damage
         rc, out = fsck_out(fb)
         ok("BAD CHECKSUM ON FNODE BLOCK" in out,
            "an fnode block with its flag cleared is still checked", out[-300:])
+
+        # The header CRC covers bytes on both sides of itself: the header
+        # before it and the last byte of the block after it.
+        # (Header byte 5 is the vestigial XOR byte: nothing structural reads
+        # it, so only the CRC can catch it. Damage to, say, the prev pointer
+        # is caught first by fsck's chain check, which would test the wrong
+        # layer.)
+        for name, at in (("the block header (byte 5, before the field)", 5),
+                         ("the last byte of the block", 511)):
+            hd = os.path.join(tmp, "fcrc.img")
+            shutil.copyfile(img, hd)
+            patch(hd, off + at, lambda x: x ^ 0x04)
+            rc, out = fsck_out(hd)
+            ok("BAD CHECKSUM ON FNODE BLOCK" in out,
+               "fnode block CRC catches damage to " + name, out[-300:])
+
+        # A word swap: XOR-invisible, so the old 8-bit fold missed it.
+        ws = os.path.join(tmp, "fswap.img")
+        shutil.copyfile(img, ws)
+        with open(ws, "r+b") as f:
+            f.seek(off)
+            u = bytearray(f.read(512))
+            u[32:40], u[40:48] = u[40:48], u[32:40]
+            if u[32:40] == u[40:48]:
+                u[32:40], u[48:56] = u[48:56], u[32:40]
+            f.seek(off)
+            f.write(u)
+        rc, out = fsck_out(ws)
+        ok(rc != 0, "fnode block CRC catches a word swap (the XOR fold could not)",
+           out[-300:])
 
         # The root fixed fnode block (CRC trailer): clear the flag and reseal,
         # then damage the payload. A flag-gated check would skip it.

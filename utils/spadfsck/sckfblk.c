@@ -84,7 +84,8 @@ static int scan_fnode_blocks_run(blk_t blk, blk_t prev, const char *(*get_filena
 #define update_block(c)							\
 do {									\
 	ff(c)->flags |= FNODE_BLOCK_CHECKSUM_VALID;			\
-	ff(c)->checksum ^= CHECKSUM_BASE ^ __byte_sum(ff(c), FNODE_BLOCK_SIZE);\
+	ff(c)->checksum = 0;						\
+	spadfs_meta_inner_seal(ff(c), FNODE_BLOCK_CRC_POS);		\
 	if (__unlikely(write_buffer(blk + c, 1, ff(c))) ||		\
 	    __unlikely(!(f = read_fblk(blk)))) {			\
 		goto read_err;						\
@@ -107,8 +108,8 @@ do {									\
 		/*
 		  checked in check_fnode_block ... this allows delayed recovery
 		  of files from damaged fnodes
-		if (__unlikely(__byte_sum(ff(c), FNODE_BLOCK_SIZE) != CHECKSUM_BASE)) {
-			log_printf(0, "%s: BAD CHECKSUM ON FNODE BLOCK %"blk_format"X: %02X", get_filename(p), blk + c, __byte_sum(ff(c), FNODE_BLOCK_SIZE) ^ CHECKSUM_BASE);
+		if (__unlikely(spadfs_meta_inner_verify(ff(c), FNODE_BLOCK_CRC_POS))) {
+			log_printf(0, "%s: BAD CHECKSUM ON FNODE BLOCK %"blk_format"X", get_filename(p), blk + c);
 			if (query(qprefix 0, "FIX?")) {
 				update_block(c);
 			}
@@ -243,7 +244,8 @@ int get_fnode_description(blk_t blk, LIST_HEAD *l, const char *(*get_filename)(v
 				CPU2SPAD16_LV(&f->cc, 0);
 				CPU2SPAD32_LV(&f->txc, 0x80000000U);
 				f->flags |= FNODE_BLOCK_CHECKSUM_VALID;
-				f->checksum ^= CHECKSUM_BASE ^ __byte_sum(f, FNODE_BLOCK_SIZE);
+				f->checksum = 0;
+				spadfs_meta_inner_seal(f, FNODE_BLOCK_CRC_POS);
 				write_buffer(prev, 1, f);
 			}
 		}

@@ -506,40 +506,31 @@ struct fnode {
  */
 #define FNODE_BLOCK_SIZE		512
 /*
- * sizeof(struct fnode_block)
+ * Size of the fnode_block header (struct fnode_block up to fnodes[]), not
+ * sizeof(struct fnode_block). 32 bytes: the original 24 plus a CRC-32C and a
+ * reserved word (see struct fnode_block).
  */
-#define SIZEOF_FNODE_BLOCK		(6 * 4)
-
+#define SIZEOF_FNODE_BLOCK		(8 * 4)
 
 /*
- * Shrunk 488 -> 480 for the CRC trailer, but by EIGHT bytes rather than
- * the four the trailer itself needs.
- *
- * FNODE_NEXT_SIZE is 0x7FF8, so fnode sizes are encoded in a field whose
- * low 3 bits are flags -- sizes must be multiples of 8. 488 was (8*61);
- * 484 is not, and (484 & 0x7FF8) silently truncates to 480. That produced
- * a phantom zero-length fnode at 24+480 = 504 on every block:
- *   /: FNODE BLOCK 42D0: INVALID FNODE SIZE 0 AT 1F8, NAMELEN 0
- * The assert below makes that class of mistake a build failure.
- *
- * Cost: 8 bytes of fnode payload per block, not 4. Bytes 504..507 are
- * unused padding and are zeroed before sealing so the CRC stays
- * deterministic.
- */
-/*
- * Stays 488. Shrinking it for a trailer is NOT possible: the kernel's
- * fnode-chain terminator is the 512-byte block boundary itself --
+ * The largest fnode, which is also the free fnode of an empty block: the
+ * chain of fnodes must tile exactly from the header to byte 512, because the
+ * walk ends at the block boundary itself --
  *   fnode += size;
  *   if ((fnode & (FNODE_BLOCK_SIZE - 1)) != 0) goto next_fnode;
- * (dir.c:576, 640, 1302, 1573 and VALIDATE_FNODE in dir.h). At 480 the
- * free fnode ends at 504, the walk does not exit, and the 504..511
- * padding is read as a fnode: size 0 -> bad_fnode -> -EFSERROR.
+ * (dir.c, namei.c and VALIDATE_FNODE in dir.h). That is why the fnode_block
+ * cannot take the 512-byte trailer every other unit uses: at 508..511 it
+ * would end the chain short and the walk would read the gap as an fnode.
+ * Its CRC lives in the header instead.
  *
- * So fnode blocks keep the legacy XOR checksum. anode and
- * fixed_fnode_block carry the trailer (Phase 2.2 Cat 2 partial).
+ * Fnode sizes are multiples of 8 (the low 3 bits of FNODE_NEXT_SIZE are
+ * flags), so the header can only grow in steps of 8. Growing it from 24 to
+ * 32 for the CRC shrank this from 488 to 480 -- 8 bytes per 512-byte
+ * directory block -- and with it FNODE_MAX_EA_SIZE (176 -> 168) and the
+ * fixed_fnode_block fnode slots (232 -> 224).
  */
 #define FNODE_MAX_SIZE		(FNODE_BLOCK_SIZE - SIZEOF_FNODE_BLOCK)
-							/* 488 */
+							/* 480 */
 #define FNODE_EMPTY_MIN_SIZE	8
 
 #define FNODE_NAME_POS		(sizeof(struct fnode))
@@ -558,7 +549,7 @@ struct fnode {
 
 #define FNODE_EA_POS(name_len)	(((FNODE_NAME_POS + (name_len)) + 7) & ~7)
 #define FNODE_MAX_EA_SIZE	(FNODE_MAX_SIZE - sizeof(struct fnode) - 256)
-		/* 176 */
+		/* 168 */
 
 #define FNODE_SIZE(name_len, ea_size)	\
 			((FNODE_EA_POS(name_len) + (ea_size) + 7) & ~7)
@@ -765,22 +756,37 @@ do {									\
 } while (0)
 
 #define FNODE_BLOCK_MAGIC		0x444F4E46
+/*
+ * Set by every writer, trusted by no reader. Covered by the CRC like the rest
+ * of the header.
+ */
 #define FNODE_BLOCK_CHECKSUM_VALID	0x01
 #define FNODE_BLOCK_LAST		0x02
 #define FNODE_BLOCK_FIRST		0x04
 
+/*
+ * crc is a CRC-32C over the whole 512-byte block except the crc field itself
+ * (spadfs_meta_inner_seal/verify in meta_crc.h, at FNODE_BLOCK_CRC_POS). It
+ * replaces the 8-bit XOR fold in checksum, which is kept only so that
+ * fixed_fnode_block can share this header's flags/checksum offsets; writers
+ * zero it. reserved is zero.
+ */
 struct fnode_block {
 	__u32 magic;
 	__u8 flags;
-	__u8 checksum;
+	__u8 checksum;	/* vestigial XOR field, zero */
 	__u16 prev1;	/* 0 if first */
 	__u32 prev0;	/* --- "" --- */
 	__s32 txc;
 	__u16 cc;
 	__u16 next1;	/* valid if CC_VALID(cc, txc) */
 	__u32 next0;	/* ---------- "" ------------ */
+	__u32 crc;
+	__u32 reserved;
 	struct fnode fnodes[1];
 };
+
+#define FNODE_BLOCK_CRC_POS		24
 
 #define FIXED_FNODE_BLOCK_SIZE		512
 #define FIXED_FNODE_BLOCK_MAGIC		0x4E465846
@@ -813,25 +819,19 @@ struct fixed_fnode_block {
 	__u16 hint_large;
 		/* &fnode0-&nlink0 must be equal to &fnode1-&nlink1 */
 	__u64 nlink0;			/* if CC_VALID(cc, txc) */
-	__u8 fnode0[FNODE_MAX_SIZE - 256];	/* 232 */
+	__u8 fnode0[FNODE_MAX_SIZE - 256];	/* 224 */
 	__u64 reserved0;
 	__u64 nlink1;			/* otherwise */
 	__u8 fnode1[FNODE_MAX_SIZE - 256];
 	/*
-	 * reserved1 used to be a __u64 spanning 504..511. Split so 504..507
-	 * stays reserved and 508..511 becomes the CRC trailer, keeping the
-	 * struct at exactly 512 and leaving the fnode0/nlink0 and fnode1/
-	 * nlink1 pair spacing untouched (the invariant noted above).
-	 */
-	/*
 	 * Sized so trailer_crc lands exactly at SPADFS_META_CRC_POS (508).
 	 * With FNODE_MAX_SIZE = 480 the fnode arrays are 224 bytes each,
 	 * fnode1 ends at 487, leaving 488..507 -- 20 bytes -- before the
-	 * trailer. The assert below pins this; if FNODE_MAX_SIZE ever changes
-	 * again the assert fires rather than the trailer drifting.
+	 * trailer. The asserts at the end of this file pin both the size and
+	 * the trailer offset, so a change to FNODE_MAX_SIZE cannot move the
+	 * trailer silently.
 	 */
-	/* fnode1 (232B) ends at 504; 504..507 reserved, 508..511 trailer. */
-	__u8 reserved1[4];
+	__u8 reserved1[20];
 	__u32 trailer_crc;
 };
 
@@ -1236,6 +1236,9 @@ static __finline__ unsigned char __byte_sum(void *__ptr, int __len)
 _Static_assert(SIZEOF_FNODE_BLOCK ==
 		(sizeof(struct fnode_block) - sizeof(struct fnode)),
 		"SIZEOF_FNODE_BLOCK desynced from struct fnode_block header");
+/* crc and reserved are the last two words of the header */
+_Static_assert(FNODE_BLOCK_CRC_POS == SIZEOF_FNODE_BLOCK - 8,
+		"FNODE_BLOCK_CRC_POS desynced from struct fnode_block");
 /*
  * For anode and fixed_fnode_block the trailer is an explicit field, so the
  * struct spans the whole unit -- but the field must sit exactly at
@@ -1264,10 +1267,10 @@ _Static_assert(CCT_BACKUP_STAMP_OFF + sizeof(struct cct_backup_stamp) <=
 		SPADFS_META_COVER,
 		"cct backup stamp must fit inside the sealed CRC unit cover");
 /*
- * Kept as guards even though fnode blocks are not trailer-covered: if anyone
- * shrinks FNODE_MAX_SIZE again these fire and force the same investigation.
- * (484 silently truncated to 480 via the FNODE_NEXT_SIZE mask; 480 leaves the
- * chain ending at 504 instead of 512.)
+ * The fnode chain must tile to the block boundary (see FNODE_MAX_SIZE). An
+ * earlier attempt at a trailer shrank FNODE_MAX_SIZE to 484, which the
+ * FNODE_NEXT_SIZE mask silently truncated to 480, leaving the chain ending
+ * at 504 instead of 512. These catch both mistakes at build time.
  */
 _Static_assert((FNODE_MAX_SIZE & 7) == 0,
 		"FNODE_MAX_SIZE must be a multiple of 8 (FNODE_NEXT_SIZE low bits are flags)");
@@ -1309,7 +1312,7 @@ _Static_assert(sizeof(struct superblock) <= 512,
 static __finline__ int spadfs_struct_check_correctness(void)
 {
 	return sizeof(struct dnode_page_entry) == 6 &&
-	       SIZEOF_FNODE_BLOCK == 24 &&
+	       SIZEOF_FNODE_BLOCK == 32 &&
 	       FIXED_FNODE_BLOCK_SIZE == 512 &&
 	       ANODE_SIZE == 512;
 }

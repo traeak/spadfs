@@ -660,8 +660,9 @@ static void write_root_dir(void)
 		CPU2SPAD16_LV(&f->next, (FNODE_MAX_SIZE & FNODE_NEXT_SIZE) | FNODE_NEXT_FREE);
 		CPU2SPAD16_LV(&f->cc, 0);
 		CPU2SPAD32_LV(&f->txc, 0);
-		b->checksum = CHECKSUM_BASE ^ __byte_sum(b, FNODE_BLOCK_SIZE);
-		/* fnode blocks stay on the XOR fold -- see struct.h FNODE_MAX_SIZE */
+		/* header CRC, not the trailer -- see struct fnode_block */
+		b->checksum = 0;
+		spadfs_meta_inner_seal(b, FNODE_BLOCK_CRC_POS);
 	}
 	write_blocks(buffer, root_dir_sector, ROOT_DIR_SECTORS);
 }

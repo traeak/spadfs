@@ -165,7 +165,7 @@ static inline void spadfs_cond_resched(void)
  *	We use 64-bit value spadfs_ino_t to denote a file. This value has
  *	embedded sector number and position within sector. The value should be
  *	created with make_spadfs_ino_t and its parts can be extracted with
- *	spadfs_ino_t_sec and spadfs_ino_t_pos. Position must be >= 24, <= 448
+ *	spadfs_ino_t_sec and spadfs_ino_t_pos. Position must be >= 32, <= 448
  *	and dividable by 8, as is specified by disk layout.
  *
  *	Fixed fnodes have position "0" and sector number is the number of fixed

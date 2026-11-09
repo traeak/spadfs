@@ -51,17 +51,18 @@ from prime import crc32c_std, META_COVER, META_CRC_POS  # noqa: E402
 # guessed:
 #   trailer (crc32c)  scksuper.c:220/369/420, sckfxfn.c:76, sckfile.c:49
 #   cct side CRC      sckcct.c:158 (region written by mkspadfs, sealed per unit)
-#   legacy __byte_sum sckdir.c:322 (fnode_block -- not converted, Cat 2 blocker)
+#   header crc32c     sckdir.c (fnode_block: CRC at header offset 24, covering
+#                     every other byte -- it cannot take a trailer)
 #   NONE              apage_index -- no checksum call site exists for it at all
 # ---------------------------------------------------------------------------
 
 TRAILER_TARGETS = {"superblock", "txblock", "root_fnode"}
 CCT_SIDE_TARGETS = {"cct", "cct_live"}
-XOR_TARGETS = {"root_dir"}
+INNER_CRC_TARGETS = {"root_dir"}
 UNPROTECTED_TARGETS = {"apage_index"}
 
 CHECKSUM_BASE = ord("C")          # struct.h:29
-FNODE_CHECKSUM_OFF = 5            # magic(4) + flags(1)
+FNODE_BLOCK_CRC_POS = 24          # struct.h, struct fnode_block
 CCT_CRC_PER_UNIT = META_COVER // 4    # 127, mirrors struct.h
 CCT_SECTORS = 512
 
@@ -90,16 +91,15 @@ def restripe_trailer(u):
         crc32c_std(bytes(u[:META_COVER])) & 0xFFFFFFFF).to_bytes(4, "little")
 
 
-def restripe_xor_fnode_block(u):
-    """Apply the XOR update trick so __byte_sum(block,512) == CHECKSUM_BASE.
+def inner_crc(u, pos=FNODE_BLOCK_CRC_POS):
+    """CRC-32C of a 512-byte unit with the 4-byte field at pos cut out
+    (spadfs_meta_inner_computed_crc in meta_crc.h)."""
+    return crc32c_std(bytes(u[:pos]) + bytes(u[pos + 4:SECTOR])) & 0xFFFFFFFF
 
-    Same identity the tree relies on at sckdir.c:1034: folding the old
-    checksum out and the new one in lands the total on CHECKSUM_BASE.
-    """
-    u[FNODE_CHECKSUM_OFF] ^= CHECKSUM_BASE ^ byte_sum(u, 512)
-    u[FNODE_CHECKSUM_OFF] &= 0xFF
-    if byte_sum(u, 512) != CHECKSUM_BASE:
-        raise AssertionError("xor restripe failed to satisfy the fnode_block invariant")
+
+def restripe_inner_crc(u, pos=FNODE_BLOCK_CRC_POS):
+    """Re-seal an fnode_block: its CRC lives in the header, not a trailer."""
+    u[pos:pos + 4] = inner_crc(u, pos).to_bytes(4, "little")
 
 
 def restripe_cct_side(f, info, cct_sector):
@@ -305,10 +305,10 @@ def main():
                         restripe_trailer(cur)
                         f.seek(off)
                         f.write(cur)
-                    elif target in XOR_TARGETS:
+                    elif target in INNER_CRC_TARGETS:
                         f.seek(off)
                         cur = bytearray(f.read(SECTOR))
-                        restripe_xor_fnode_block(cur)
+                        restripe_inner_crc(cur)
                         f.seek(off)
                         f.write(cur)
                     elif target in CCT_SIDE_TARGETS:

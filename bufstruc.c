@@ -57,19 +57,22 @@ struct fnode_block *spadfs_read_fnode_block(SPADFS *fs, sector_t secno,
 		if (unlikely(!(struct_type & SRFB_FNODE)))
 			goto bad_magic;
 		/*
-		 * Regular fnode chain: legacy XOR fold (see the fixed-fnode
-		 * branch below for why the trailer cannot be used here).
+		 * Regular fnode chain: CRC-32C in the header (struct.h).
 		 * Checked whatever FNODE_BLOCK_CHECKSUM_VALID says: every
 		 * writer seals, so the bit is always set on a good block, and
 		 * trusting it would let one flipped bit switch the check off.
 		 */
 		start_concurrent_atomic_buffer_read(fs, *bhp);
-		if (unlikely(__byte_sum(fnode_block, 512) != CHECKSUM_BASE)) {
+		if (unlikely(spadfs_meta_inner_verify(fnode_block,
+						      FNODE_BLOCK_CRC_POS))) {
 			end_concurrent_atomic_buffer_read(fs, *bhp);
 			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-				"bad checksum on fnode block %Lx at %s",
-				(unsigned long long)secno,
-				msg);
+				"bad checksum on fnode block %Lx at %s: stored %08x computed %08x",
+				(unsigned long long)secno, msg,
+				spadfs_meta_inner_stored_crc(fnode_block,
+							     FNODE_BLOCK_CRC_POS),
+				spadfs_meta_inner_computed_crc(fnode_block,
+							       FNODE_BLOCK_CRC_POS));
 			goto rel_err;
 		}
 		end_concurrent_atomic_buffer_read(fs, *bhp);

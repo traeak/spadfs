@@ -141,3 +141,22 @@ volume with any `flags_compat_fsck` bit set. Root runs by the operator on
 
 The positive control (the `HEAD` module before this change must fail the
 "cleared flag" section) was not run.
+
+## 2026-11-09: fnode_block header CRC (Phase 1b of the checksum follow-up)
+
+The fnode_block header grew from 24 to 32 bytes to hold a CRC-32C over the
+rest of the block, replacing the last 8-bit XOR checksum in the format.
+FNODE_MAX_SIZE 488 -> 480, FNODE_MAX_EA_SIZE 176 -> 168 (symlinks up to 164
+characters, was 172), fixed_fnode_block fnode slots 232 -> 224. Root runs
+by the operator on 7.3.0_1, all pass: `meta_csum_mount.sh` (both block
+sizes), `mount_smoke.sh`, `crash_logwrites.sh`, `cc_wrap_mount.sh`.
+
+The first `meta_csum_mount.sh` run failed both block sizes with
+`/e/hard: INVALID EXTENDED ATTRIBUTES ON FIXED FNODE BLOCK`. The kernel was
+right: the tool Makefile rules had no header dependencies, so after the
+`struct.h` change only the edited .c files were recompiled and spadfsck
+linked a `sckfxfn.o` built against the old layout. It read the second fixed
+fnode slot at the old offset (280, not 264). The saved images passed a clean
+rebuild of spadfsck unchanged. The unprivileged suite missed it because it
+never makes a hard link, so it never creates a fixed fnode block. The
+Makefile now generates dependencies (`-MMD -MP`).

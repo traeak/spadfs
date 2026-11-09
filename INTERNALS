@@ -102,7 +102,7 @@ give up.
 Extended attributes
 -------------------
 
-Each fnode can have up to 176 bytes of extended attributes. The attributes are
+Each fnode can have up to 168 bytes of extended attributes. The attributes are
 identified by a name (3 bytes), length (1 byte) and content. Unlike in other
 filesystems, extended attributes are not meant to be changeable by the user, they
 are meant to be set by the filesystem driver to deal with specifics of a given

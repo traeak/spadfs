@@ -55,12 +55,12 @@ target whose contents the class can actually change.
 | root_dir | word_swap | DETECTED | detected |
 | root_dir | word_dup | DETECTED | detected |
 | root_dir | block_copy | NOOP | n/a (no live bytes to change) |
-| root_dir | xor_cancel | MISSED | **NOT DETECTED** |
+| root_dir | xor_cancel | DETECTED | detected |
 | root_dir | zero_out | DETECTED | detected |
 
 ## Summary
 
 - cases attempted: 49
-- detected: 37
-- **NOT detected: 1**
+- detected: 38
+- **NOT detected: 0**
 - not applicable / harness error: 11
