@@ -43,7 +43,7 @@ SIZE="${TEST_IMAGE_SIZE:-16M}"
 IMG="$WORKDIR/cct.img"
 PRIMED="$WORKDIR/cct-primed.img"
 
-make_image "$IMG" "$SIZE" "--checksums" || die "make_image failed"
+make_image "$IMG" "$SIZE" || die "make_image failed"
 
 # Prime: cc=4 with plausible transaction counts.
 python3 "$TESTS_DIR/prime.py" "$IMG" --cc 4 --base-txc 1388 >&2 || die "prime failed"

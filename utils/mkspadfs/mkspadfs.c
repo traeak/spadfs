@@ -138,7 +138,6 @@ static int dir_sizes =
 #endif
 ;
 static int extra_space = 1;
-static int no_checksums = 0;
 
 #define MAX_PAGE_SIZE	(512 << MAX_SECTORS_PER_PAGE_BITS)
 #define MAX_BLOCK_SIZE	(512 << MAX_SECTORS_PER_BLOCK_BITS)
@@ -529,8 +528,6 @@ static void write_super(void)
 		CPU2SPAD32_LV(&sb->flags_compat_none, SPAD2CPU32_LV(&sb->flags_compat_none) | FLAG_COMPAT_NONE_DYNAMIC_MAGIC);
 	if (extra_space)
 		CPU2SPAD32_LV(&sb->flags_compat_none, SPAD2CPU32_LV(&sb->flags_compat_none) | FLAG_COMPAT_NONE_EXTRA_SPACE);
-	if (no_checksums)
-		CPU2SPAD32_LV(&sb->flags_compat_fsck, SPAD2CPU32_LV(&sb->flags_compat_fsck) | FLAG_COMPAT_FSCK_NO_CHECKSUMS);
 	sb->checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
 				 * zeroed to a deterministic value so the trailer
 				 * covers it, and the superblock trailer is authoritative */
@@ -841,8 +838,6 @@ static const struct __param_table params[20] = {
 	"NO_RESERVED_BEGINNING", __PARAM_BOOL, ~0, 1,
 	"DIRECTORY_SIZES", __PARAM_BOOL, ~0, 1,
 	"NO_DIRECTORY_SIZES", __PARAM_BOOL, ~0, 0,
-	"NO_CHECKSUMS", __PARAM_BOOL, ~0, 1,
-	"CHECKSUMS", __PARAM_BOOL, ~0, 0,
 	"RESERVE", __PARAM_INT64, 0, 1,
 	"BLOCK_SIZE", __PARAM_INT, 512, MAX_BLOCK_SIZE + 1,
 	"FNODE_SIZE", __PARAM_INT, 512, MAX_PAGE_SIZE + 1,
@@ -867,8 +862,6 @@ static void *const vars[20] = {
 	&extra_space,
 	&dir_sizes,
 	&dir_sizes,
-	&no_checksums,
-	&no_checksums,
 	&reserve,
 	&block_size,
 	&fnode_size,
@@ -923,10 +916,6 @@ int main(int argc, const char * const argv[])
 			dir_sizes = 1;
 		} else if (!strcasecmp(*arg, "--no-directory-sizes")) {
 			dir_sizes = 0;
-		} else if (!strcasecmp(*arg, "--no-checksums")) {
-			no_checksums = 1;
-		} else if (!strcasecmp(*arg, "--checksums")) {
-			no_checksums = 0;
 		} else if (!strcasecmp(*arg, "--reserve")) {
 			num = get_number(*++arg, &num_error);
 			if (num_error || num < 0) goto syn;

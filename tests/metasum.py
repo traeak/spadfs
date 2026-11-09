@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report the 8-bit checksums of every live apage half and dnode in an image.
+"""Report the checksums of every live apage half, dnode and anode in an image.
 
     metasum.py IMAGE            summary lines, key=value
     metasum.py IMAGE --list     one line per structure as well
@@ -17,6 +17,11 @@ The formulas are the ones spadfsck verifies with (sckapage.c, sckdir.c):
     apage half   xor(half[8:]) == CHECKSUM_BASE
     dnode        xor(entries[version]) == CHECKSUM_BASE ^ checksum[version]
 
+Anodes (the extent overflow blocks of fragmented files) carry the 32-bit
+CRC trailer instead: crc32c(block[0:508]) == block[508:512]. Every block with
+anode magic is judged, so a freed anode whose sector was not reused is counted
+too -- its CRC was valid when it was written, so it still is.
+
 Inactive halves and versions are not judged: a crash may leave them torn.
 Used by tests/meta_csum_mount.sh to show the kernel seals what it writes.
 Little-endian volumes only, like the rest of the fixtures.
@@ -26,6 +31,7 @@ import struct
 import sys
 
 import sbinfo
+from prime import crc32c_std, META_COVER
 
 CHECKSUM_BASE = 0x43
 APAGE_MAGIC = 0x5041
@@ -33,6 +39,8 @@ APAGE_CHECKSUM_VALID = 0x40
 DNODE_PAGE_MAGIC = 0x444F4E44
 DNODE_CHECKSUM_VALID = 0x01
 DNODE_ENTRY_OFFSET = 24
+ANODE_MAGIC = 0x444F4E41
+ANODE_CHECKSUM_VALID = 0x01
 FLAG_COMPAT_NONE_DYNAMIC_MAGIC = 0x2
 
 
@@ -107,6 +115,18 @@ class Volume:
             out.append((s, not self.cc_valid(cc, txc)))
         return out
 
+    def anodes(self):
+        """(sector, 512-byte block) for every block with anode magic."""
+        dyn = self.sb["flags_compat_none"] & FLAG_COMPAT_NONE_DYNAMIC_MAGIC
+        bs = 1 << self.sb["sectors_per_block_bits"]
+        out = []
+        for s in range(0, len(self.img) // 512, bs):
+            (m,) = struct.unpack_from("<I", self.img, s * 512)
+            want = ANODE_MAGIC ^ (s & 0xffffffff) if dyn else ANODE_MAGIC
+            if m == want:
+                out.append((s, self.sec(s)))
+        return out
+
     def dnode_data_size(self):
         pagesize_bits = self.sb["sectors_per_page_bits"] + 9
         return 6 << (pagesize_bits - 3 - 1)
@@ -136,6 +156,14 @@ def judge(vol):
             rows.append(("dnode", sec, "good"))
         else:
             rows.append(("dnode", sec, "bad"))
+    for sec, blk in vol.anodes():
+        stored = struct.unpack_from("<I", blk, META_COVER)[0]
+        if not blk[4] & ANODE_CHECKSUM_VALID:
+            rows.append(("anode", sec, "unsealed"))
+        elif crc32c_std(blk[:META_COVER]) & 0xffffffff == stored:
+            rows.append(("anode", sec, "good"))
+        else:
+            rows.append(("anode", sec, "bad"))
     return rows
 
 
@@ -147,7 +175,7 @@ def main():
     if "--list" in sys.argv[2:]:
         for kind, sec, verdict in rows:
             print("%s %d %s" % (kind, sec, verdict))
-    for kind in ("apage", "dnode"):
+    for kind in ("apage", "dnode", "anode"):
         mine = [v for k, _, v in rows if k == kind]
         print("%s_total=%d" % (kind, len(mine)))
         for v in ("good", "bad", "unsealed", "bad-magic"):

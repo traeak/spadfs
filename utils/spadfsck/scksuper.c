@@ -139,7 +139,8 @@ static int test_sb_at_sector(blk_t sector)
 		log_printf(0, "BAD %s VERSION NUMBER (DISK: %d.%d.%d, " TOOL_BANNER ": %d.%d.%d)", super.version_major != SPADFS_VERSION_MAJOR ? "MAJOR" : "MIDDLE", super.version_major, super.version_middle, super.version_minor, SPADFS_VERSION_MAJOR, SPADFS_VERSION_MIDDLE, SPADFS_VERSION_MINOR);
 		return 2;
 	}
-	if (__unlikely(SPAD2CPU32_LV(&super.flags_compat_rw) & ~(0)) ||
+	if (__unlikely(SPAD2CPU32_LV(&super.flags_compat_fsck) & ~(0)) ||
+	    __unlikely(SPAD2CPU32_LV(&super.flags_compat_rw) & ~(0)) ||
 	    __unlikely(SPAD2CPU32_LV(&super.flags_compat_ro) & ~(FLAG_COMPAT_RO_DIRECTORY_SIZES)) ||
 	    __unlikely(SPAD2CPU32_LV(&super.flags_compat_none) & ~(FLAG_COMPAT_NONE_UNIX_NAMES | FLAG_COMPAT_NONE_DYNAMIC_MAGIC | FLAG_COMPAT_NONE_EXTRA_SPACE))) {
 		log_printf(0, "INCOMPATIBLE FEATURE FLAGS IN SUPERBLOCK: %08X/%08X/%08X/%08X",

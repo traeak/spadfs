@@ -100,10 +100,7 @@ static void really_do_anode_checksum(struct anode *anode)
 
 static void do_anode_checksum(SPADFS *fs, struct anode *anode)
 {
-	if (unlikely(make_checksums(fs)))
-		really_do_anode_checksum(anode);
-	else
-		anode->flags &= ~ANODE_CHECKSUM_VALID;
+	really_do_anode_checksum(anode);
 }
 
 static struct anode *alloc_anode(SPADFNODE *f, sector_t hint,

@@ -93,7 +93,7 @@ do_umount() {
 }
 
 fresh() { # fresh IMG BS -- formatted and primed (tx.cc 1, real txc values)
-	make_image "$1" 64M --checksums --block-size "$2" || die "make_image failed"
+	make_image "$1" 64M --block-size "$2" || die "make_image failed"
 	python3 -I "$TESTS_DIR/prime.py" "$1" --cc 1 --base-txc 100 >/dev/null 2>&1 \
 		|| die "prime failed"
 }

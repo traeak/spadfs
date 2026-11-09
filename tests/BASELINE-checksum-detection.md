@@ -6,57 +6,57 @@ Detector: `spadfsck -n -f` (forced full check, read-only).
 Image size: 16M. Corruption is applied to the first 512-byte unit at the
 target whose contents the class can actually change.
 
-| Target | Class | checksums | no-checksums | Result |
-|---|---|---|---|---|
-| superblock | bitflip | DETECTED | DETECTED | detected |
-| superblock | byte_transpose | DETECTED | DETECTED | detected |
-| superblock | word_swap | DETECTED | DETECTED | detected |
-| superblock | word_dup | DETECTED | DETECTED | detected |
-| superblock | block_copy | DETECTED | DETECTED | detected |
-| superblock | xor_cancel | DETECTED | DETECTED | detected |
-| superblock | zero_out | DETECTED | DETECTED | detected |
-| txblock | bitflip | DETECTED | DETECTED | detected |
-| txblock | byte_transpose | NOOP | NOOP | n/a (no live bytes to change) |
-| txblock | word_swap | NOOP | NOOP | n/a (no live bytes to change) |
-| txblock | word_dup | NOOP | NOOP | n/a (no live bytes to change) |
-| txblock | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
-| txblock | xor_cancel | DETECTED | DETECTED | detected |
-| txblock | zero_out | NOOP | NOOP | n/a (no live bytes to change) |
-| apage_index | bitflip | DETECTED | DETECTED | detected |
-| apage_index | byte_transpose | NOOP | NOOP | n/a (no live bytes to change) |
-| apage_index | word_swap | DETECTED | DETECTED | detected |
-| apage_index | word_dup | DETECTED | DETECTED | detected |
-| apage_index | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
-| apage_index | xor_cancel | DETECTED | DETECTED | detected |
-| apage_index | zero_out | DETECTED | DETECTED | detected |
-| cct | bitflip | DETECTED | DETECTED | detected |
-| cct | byte_transpose | DETECTED | DETECTED | detected |
-| cct | word_swap | DETECTED | DETECTED | detected |
-| cct | word_dup | DETECTED | DETECTED | detected |
-| cct | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
-| cct | xor_cancel | DETECTED | DETECTED | detected |
-| cct | zero_out | DETECTED | DETECTED | detected |
-| cct_live | bitflip | DETECTED | DETECTED | detected |
-| cct_live | byte_transpose | DETECTED | DETECTED | detected |
-| cct_live | word_swap | DETECTED | DETECTED | detected |
-| cct_live | word_dup | DETECTED | DETECTED | detected |
-| cct_live | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
-| cct_live | xor_cancel | DETECTED | DETECTED | detected |
-| cct_live | zero_out | DETECTED | DETECTED | detected |
-| root_fnode | bitflip | DETECTED | DETECTED | detected |
-| root_fnode | byte_transpose | DETECTED | DETECTED | detected |
-| root_fnode | word_swap | DETECTED | DETECTED | detected |
-| root_fnode | word_dup | DETECTED | DETECTED | detected |
-| root_fnode | block_copy | DETECTED | DETECTED | detected |
-| root_fnode | xor_cancel | DETECTED | DETECTED | detected |
-| root_fnode | zero_out | DETECTED | DETECTED | detected |
-| root_dir | bitflip | DETECTED | DETECTED | detected |
-| root_dir | byte_transpose | NOOP | NOOP | n/a (no live bytes to change) |
-| root_dir | word_swap | DETECTED | DETECTED | detected |
-| root_dir | word_dup | DETECTED | DETECTED | detected |
-| root_dir | block_copy | NOOP | NOOP | n/a (no live bytes to change) |
-| root_dir | xor_cancel | MISSED | MISSED | **NOT DETECTED** |
-| root_dir | zero_out | DETECTED | DETECTED | detected |
+| Target | Class | spadfsck | Result |
+|---|---|---|---|
+| superblock | bitflip | DETECTED | detected |
+| superblock | byte_transpose | DETECTED | detected |
+| superblock | word_swap | DETECTED | detected |
+| superblock | word_dup | DETECTED | detected |
+| superblock | block_copy | DETECTED | detected |
+| superblock | xor_cancel | DETECTED | detected |
+| superblock | zero_out | DETECTED | detected |
+| txblock | bitflip | DETECTED | detected |
+| txblock | byte_transpose | NOOP | n/a (no live bytes to change) |
+| txblock | word_swap | NOOP | n/a (no live bytes to change) |
+| txblock | word_dup | NOOP | n/a (no live bytes to change) |
+| txblock | block_copy | NOOP | n/a (no live bytes to change) |
+| txblock | xor_cancel | DETECTED | detected |
+| txblock | zero_out | NOOP | n/a (no live bytes to change) |
+| apage_index | bitflip | DETECTED | detected |
+| apage_index | byte_transpose | NOOP | n/a (no live bytes to change) |
+| apage_index | word_swap | DETECTED | detected |
+| apage_index | word_dup | DETECTED | detected |
+| apage_index | block_copy | NOOP | n/a (no live bytes to change) |
+| apage_index | xor_cancel | DETECTED | detected |
+| apage_index | zero_out | DETECTED | detected |
+| cct | bitflip | DETECTED | detected |
+| cct | byte_transpose | DETECTED | detected |
+| cct | word_swap | DETECTED | detected |
+| cct | word_dup | DETECTED | detected |
+| cct | block_copy | NOOP | n/a (no live bytes to change) |
+| cct | xor_cancel | DETECTED | detected |
+| cct | zero_out | DETECTED | detected |
+| cct_live | bitflip | DETECTED | detected |
+| cct_live | byte_transpose | DETECTED | detected |
+| cct_live | word_swap | DETECTED | detected |
+| cct_live | word_dup | DETECTED | detected |
+| cct_live | block_copy | NOOP | n/a (no live bytes to change) |
+| cct_live | xor_cancel | DETECTED | detected |
+| cct_live | zero_out | DETECTED | detected |
+| root_fnode | bitflip | DETECTED | detected |
+| root_fnode | byte_transpose | DETECTED | detected |
+| root_fnode | word_swap | DETECTED | detected |
+| root_fnode | word_dup | DETECTED | detected |
+| root_fnode | block_copy | DETECTED | detected |
+| root_fnode | xor_cancel | DETECTED | detected |
+| root_fnode | zero_out | DETECTED | detected |
+| root_dir | bitflip | DETECTED | detected |
+| root_dir | byte_transpose | NOOP | n/a (no live bytes to change) |
+| root_dir | word_swap | DETECTED | detected |
+| root_dir | word_dup | DETECTED | detected |
+| root_dir | block_copy | NOOP | n/a (no live bytes to change) |
+| root_dir | xor_cancel | MISSED | **NOT DETECTED** |
+| root_dir | zero_out | DETECTED | detected |
 
 ## Summary
 

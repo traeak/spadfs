@@ -28,16 +28,14 @@ PROFILES=(
 	"spadnames|--spad-names|flags_compat_none=0x00000006"
 	"dynmagic|--dynamic-magic|flags_compat_none=0x00000007"
 	"staticmagic|--static-magic|flags_compat_none=0x00000005"
-	"checksums|--checksums|flags_compat_fsck=0x00000000"
-	"nochecksums|--no-checksums|flags_compat_fsck=0x00000001"
 	"dirsizes|--directory-sizes|flags_compat_ro=0x00000001"
 	"nodirsizes|--no-directory-sizes|flags_compat_ro=0x00000000"
 	"bigendian|--big-endian|byte_sex=big"
 	"littleendian|--little-endian|byte_sex=little"
 	"cluster4096|--cluster-size 4096|sectors_per_cluster_bits=3"
 	"cluster65536|--cluster-size 65536|sectors_per_cluster_bits=7"
-	"combo-a|--unix-names --block-size 4096 --dynamic-magic --checksums|sectors_per_block_bits=3;flags_compat_none=0x00000007;flags_compat_fsck=0x00000000"
-	"combo-b|--spad-names --block-size 512 --static-magic --no-checksums|sectors_per_block_bits=0;flags_compat_none=0x00000004;flags_compat_fsck=0x00000001"
+	"combo-a|--unix-names --block-size 4096 --dynamic-magic|sectors_per_block_bits=3;flags_compat_none=0x00000007;flags_compat_fsck=0x00000000"
+	"combo-b|--spad-names --block-size 512 --static-magic|sectors_per_block_bits=0;flags_compat_none=0x00000004;flags_compat_fsck=0x00000000"
 	"combo-c|--big-endian --spad-names --no-directory-sizes|byte_sex=big;flags_compat_none=0x00000006;flags_compat_ro=0x00000000"
 )
 

@@ -98,7 +98,7 @@ for bs in 512 4096; do
 	log "== block size $bs =="
 
 	img="$WORKDIR/clean-$bs.img"
-	make_image "$img" 64M --checksums --block-size "$bs" || die "make_image failed"
+	make_image "$img" 64M --block-size "$bs" || die "make_image failed"
 	python3 -I "$TESTS_DIR/prime.py" "$img" --cc 1 --base-txc 100 >/dev/null 2>&1 \
 		|| die "prime failed"
 	if mount_cycle "$img"; then
@@ -110,7 +110,7 @@ for bs in 512 4096; do
 	fi
 
 	img="$WORKDIR/rot-$bs.img"
-	make_image "$img" 64M --checksums --block-size "$bs" || die "make_image failed"
+	make_image "$img" 64M --block-size "$bs" || die "make_image failed"
 	python3 -I "$TESTS_DIR/prime.py" "$img" --cc 1 --base-txc 100 >/dev/null 2>&1 \
 		|| die "prime failed"
 	nrot=0

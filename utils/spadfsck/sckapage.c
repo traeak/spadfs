@@ -229,7 +229,8 @@ do {									\
 			sec += 1 << (super.sectors_per_page_bits - 1);
 		}
 		start = j ? SPAD2CPU64_LV(&apage_index[j - 1].end_sector) : 0;
-		if (a->s.u.l.flags & APAGE_CHECKSUM_VALID) {
+		/* checked whatever APAGE_CHECKSUM_VALID says (struct.h) */
+		{
 			__u8 chs = __byte_sum(&a->s, (1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)) - (sizeof(struct apage_head) - sizeof(struct apage_subhead))) ^ CHECKSUM_BASE;
 			if (__unlikely(chs)) {
 				if (apage_checks < MAX_SAME_ERRORS) {

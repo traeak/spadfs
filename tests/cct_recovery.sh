@@ -112,7 +112,7 @@ stamp_is() {
 # recreate path works before we rely on it for the other cases.
 make_synced_volume() {
 	local dst="$1"
-	make_image "$BASE_TMP" "$SIZE" "--checksums" || return 1
+	make_image "$BASE_TMP" "$SIZE" || return 1
 	python3 "$TESTS_DIR/prime.py" "$BASE_TMP" --cc 4 --base-txc 1388 >&2 || return 1
 	corrupt "$BASE_TMP" cct_backup 8 || return 1
 	# primary good + backup bad -> recreate, auto-answered by -y (not Q_IMPORTANT)
@@ -131,7 +131,7 @@ log "=== Phase 3.2: cct backup recovery matrix ==="
 # --------------------------------------------------------------------------
 case_stale_backup_verifies() {
 	local img="$WORKDIR/stale.img"
-	make_image "$img" "$SIZE" "--checksums" || { bad "stale: make_image"; return; }
+	make_image "$img" "$SIZE" || { bad "stale: make_image"; return; }
 	python3 "$TESTS_DIR/prime.py" "$img" --cc 4 --base-txc 1388 >&2 || { bad "stale: prime"; return; }
 
 	local p
@@ -174,7 +174,7 @@ print('DIFFER' if prim!=bak else 'SAME')")
 # --------------------------------------------------------------------------
 case_fresh_stamped() {
 	local img="$WORKDIR/fresh.img"
-	make_image "$img" "$SIZE" "--checksums" || { bad "fresh: make_image"; return; }
+	make_image "$img" "$SIZE" || { bad "fresh: make_image"; return; }
 	stamp_is "fresh volume: mirror stamped cc 0 and identical to the primary" \
 		"$img" "magic=ok stamp_cc=0 stamp_txc=0 sealed=yes tx_cc=0 primary_txc=0 mirror=same"
 	run_fsck "$img" -f -n
@@ -231,7 +231,7 @@ case_restore_current() {
 # --------------------------------------------------------------------------
 case_restore_stale_gated() {
 	local img="$WORKDIR/c2b.img"
-	make_image "$img" "$SIZE" "--checksums" || { bad "case2b make_image"; return; }
+	make_image "$img" "$SIZE" || { bad "case2b make_image"; return; }
 	# primed to cc 4, mirror left as mkfs wrote it: stamped cc 0
 	python3 "$TESTS_DIR/prime.py" "$img" --cc 4 --base-txc 1388 >&2 || { bad "case2b prime"; return; }
 	corrupt "$img" cct 20 || { bad "case2b corrupt"; return; }
@@ -294,7 +294,7 @@ case_stamp_mismatch() {
 # --------------------------------------------------------------------------
 case_restore_yes() {
 	local img="$WORKDIR/c3.img"
-	make_image "$img" "$SIZE" "--checksums" || { bad "case3 make_image"; return; }
+	make_image "$img" "$SIZE" || { bad "case3 make_image"; return; }
 	python3 "$TESTS_DIR/prime.py" "$img" --cc 4 --base-txc 1388 >&2 || { bad "case3 prime"; return; }
 	corrupt "$img" cct 24 || { bad "case3 corrupt"; return; }
 

@@ -246,7 +246,13 @@ struct superblock {
 	__u64 cct_backup_crc;
 };
 
-#define FLAG_COMPAT_FSCK_NO_CHECKSUMS	0x00000001
+/*
+ * flags_compat_fsck has no bits. Its one bit, NO_CHECKSUMS, is gone:
+ * checksums are always made and always checked, and every reader refuses a
+ * volume with any bit set here. The per-block *_CHECKSUM_VALID bits are
+ * still set by every writer but trusted by no reader -- a check gated on a
+ * bit inside the block it protects is turned off by flipping that bit.
+ */
 #define FLAG_COMPAT_RO_DIRECTORY_SIZES	0x00000001
 #define FLAG_COMPAT_NONE_UNIX_NAMES	0x00000001
 #define FLAG_COMPAT_NONE_DYNAMIC_MAGIC	0x00000002

@@ -90,14 +90,6 @@ If size is not specified, mkspadfs detects it. Size can have suffix 'K', 'M',
 --trim
 	Discard the content of the block device
 
---no-checksums
-	Turns off checksums on metadata
-	- can be overridden with mount option
-
---checksums
-	Turns on checksums on metadata (default)
-	- can be overridden with mount option
-
 --block-size <number>
 	Block size, minimum is 512B, maximum is 64KiB. The real maximum that can
 	be accessed by the kernel is page size of a machine.
@@ -322,11 +314,6 @@ xfer_size=xxx
 
 sync_time=xxx
 	Sync after this interval in seconds. (default is 2 minutes)
-
-no_checksums
-checksums
-	Don't or do make and check metadata checksums. Overrides mkspadfs
-	parameter.
 
 ino64=no/yes/force
 	Return 64-bit inode numbers. Unfortunatelly, it will break some 32-bit

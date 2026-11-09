@@ -46,7 +46,7 @@ do {									\
 	if (__unlikely(SPAD2CPU32_LV(&anode->magic) != magic(ano, ANODE_MAGIC)))									\
 		goto magic_err;						\
 } while (0)
-	if (anode->flags & ANODE_CHECKSUM_VALID && __unlikely(spadfs_meta_verify(anode))) {
+	if (__unlikely(spadfs_meta_verify(anode))) {
 		log_printf(0, "%s: BAD CHECKSUM ON ANODE %"blk_format"X: stored %08X computed %08X", get_filename(p), ano, spadfs_meta_stored_crc(anode), spadfs_meta_computed_crc(anode));
 		if (query(qprefix 0, "FIX?")) {
 			update_anode;

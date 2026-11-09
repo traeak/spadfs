@@ -116,7 +116,6 @@ enum {
 	Opt_help, Opt_uid, Opt_gid, Opt_umask,
 	Opt_prealloc_part, Opt_prealloc_min, Opt_prealloc_max,
 	Opt_xfer_size, Opt_buffer_size, Opt_prefetch, Opt_sync_time,
-	Opt_no_checksums, Opt_checksums,
 	Opt_ino64,
 	Opt_usrquota, Opt_grpquota,
 	Opt_err,
@@ -135,8 +134,6 @@ static match_table_t tokens = {
 	{Opt_buffer_size, "buffer_size=%u"},
 	{Opt_prefetch, "prefetch=%u"},
 	{Opt_sync_time, "sync_time=%u"},
-	{Opt_no_checksums, "no_checksums"},
-	{Opt_checksums, "checksums"},
 	{Opt_ino64, "ino64=%s"},
 	{Opt_usrquota, "usrquota"},
 	{Opt_grpquota, "grpquota"},
@@ -242,18 +239,6 @@ __cold static int parse_opts(SPADFS *fs, char *opts, int remount)
 					return 0;
 				fs->spadfs_sync_time = (unsigned long)option * HZ;
 				break;
-			case Opt_checksums:
-				fs->mount_flags |=
-					MOUNT_FLAGS_CHECKSUMS_OVERRIDE;
-				fs->mount_flags |=
-					MOUNT_FLAGS_CHECKSUMS;
-				break;
-			case Opt_no_checksums:
-				fs->mount_flags |=
-					MOUNT_FLAGS_CHECKSUMS_OVERRIDE;
-				fs->mount_flags &=
-					~MOUNT_FLAGS_CHECKSUMS;
-				break;
 			case Opt_ino64:
 				match_strlcpy(str, args, sizeof str);
 				if (!strcmp(str, "no")) {
@@ -312,10 +297,6 @@ static int spadfs_show_options(struct seq_file *seq, struct dentry *root)
 	seq_printf(seq, ",buffer_size=%u", 512U << fs->sectors_per_buffer_bits);
 	seq_printf(seq, ",prefetch=%u", fs->metadata_prefetch << 9);
 	seq_printf(seq, ",sync_time=%lu", fs->spadfs_sync_time / HZ);
-	if (fs->mount_flags & MOUNT_FLAGS_CHECKSUMS)
-		seq_printf(seq, ",checksums");
-	else
-		seq_printf(seq, ",no_checksums");
 	if (!(fs->mount_flags & MOUNT_FLAGS_64BIT_INO))
 		seq_printf(seq, ",ino64=no");
 	else if (!(fs->mount_flags & MOUNT_FLAGS_64BIT_INO_FORCE))
@@ -348,8 +329,6 @@ SPADFS filesystem options:\n\
         buffer_size=xxx         set kernel buffer size\n\
         prefetch=xxx            metadata prefetch in bytes\n\
         sync_time=xxx           sync after this interval in seconds\n\
-        no_checksums            do not check and make checksums\n\
-        checksums               do check and make checksums\n\
         ino64=no,yes,force      use 64-bit inode numbers\n\
         usrquota                user quota\n\
         grpquota                group quota\n\
@@ -1263,8 +1242,6 @@ struct spadfs_fc_context {
 	unsigned buffer_size;
 	unsigned prefetch;
 	unsigned long sync_time;
-	bool no_checksums;
-	bool checksums;
 	int ino64;
 #ifdef SPADFS_QUOTA
 	bool usrquota;
@@ -1285,13 +1262,6 @@ static void spadfs_setup_params(SPADFS *fs, struct fs_context *fc)
 	fs->buffer_size = ctx->buffer_size;
 	fs->metadata_prefetch = ctx->prefetch;
 	fs->spadfs_sync_time = ctx->sync_time;
-	if (ctx->no_checksums) {
-		fs->mount_flags |= MOUNT_FLAGS_CHECKSUMS_OVERRIDE;
-		fs->mount_flags &= ~MOUNT_FLAGS_CHECKSUMS;
-	} else if (ctx->checksums) {
-		fs->mount_flags |= MOUNT_FLAGS_CHECKSUMS_OVERRIDE;
-		fs->mount_flags |= MOUNT_FLAGS_CHECKSUMS;
-	}
 	if (ctx->ino64 == 0) {
 		fs->mount_flags &= ~(MOUNT_FLAGS_64BIT_INO | MOUNT_FLAGS_64BIT_INO_FORCE);
 	} else if (ctx->ino64 == 1) {
@@ -1620,7 +1590,8 @@ read_again:
 		r = -EINVAL;
 		goto err2;
 	}
-	if (unlikely(SPAD2CPU32_LV(&sb->flags_compat_rw) & ~(0)) ||
+	if (unlikely(SPAD2CPU32_LV(&sb->flags_compat_fsck) & ~(0)) ||
+	    unlikely(SPAD2CPU32_LV(&sb->flags_compat_rw) & ~(0)) ||
 	    unlikely(SPAD2CPU32_LV(&sb->flags_compat_ro) & ~(
 				FLAG_COMPAT_RO_DIRECTORY_SIZES)) ||
 	    unlikely(SPAD2CPU32_LV(&sb->flags_compat_none) & ~(
@@ -1722,13 +1693,6 @@ read_again:
 	fs->flags_compat_rw = SPAD2CPU32_LV(&sb->flags_compat_rw);
 	fs->flags_compat_ro = SPAD2CPU32_LV(&sb->flags_compat_ro);
 	fs->flags_compat_none = SPAD2CPU32_LV(&sb->flags_compat_none);
-
-	if (fs->mount_flags & MOUNT_FLAGS_CHECKSUMS_OVERRIDE) {
-		if (fs->mount_flags & MOUNT_FLAGS_CHECKSUMS)
-			fs->flags_compat_fsck &= ~FLAG_COMPAT_FSCK_NO_CHECKSUMS;
-		else
-			fs->flags_compat_fsck |= FLAG_COMPAT_FSCK_NO_CHECKSUMS;
-	}
 
 	if (!fs->xfer_size) {
 		fs->xfer_size = fs->cluster_threshold;
@@ -2185,8 +2149,6 @@ static const struct fs_parameter_spec spadfs_param_spec[] = {
 	fsparam_u32	("buffer_size",		Opt_buffer_size),
 	fsparam_u32	("prefetch",		Opt_prefetch),
 	fsparam_u32	("sync_time",		Opt_sync_time),
-	fsparam_flag	("no_checksums",	Opt_no_checksums),
-	fsparam_flag	("checksums",		Opt_checksums),
 	fsparam_enum	("ino64",		Opt_ino64,	spadfs_param_ino64),
 #ifdef SPADFS_QUOTA
 	fsparam_flag	("usrquota",		Opt_usrquota),
@@ -2274,14 +2236,6 @@ __cold static int spadfs_parse_param(struct fs_context *fc, struct fs_parameter 
 				return -EINVAL;
 			ctx->sync_time = (unsigned long)result.uint_32 * HZ;
 			break;
-		case Opt_no_checksums:
-			ctx->no_checksums = true;
-			ctx->checksums = false;
-			break;
-		case Opt_checksums:
-			ctx->no_checksums = false;
-			ctx->checksums = true;
-			break;
 		case Opt_ino64:
 			ctx->ino64 = result.uint_32;
 			break;
@@ -2328,8 +2282,6 @@ __cold static int spadfs_init_fs_context(struct fs_context *fc)
 		ctx->buffer_size = 512U << fs->sectors_per_buffer_bits;
 		ctx->prefetch = fs->metadata_prefetch;
 		ctx->sync_time = fs->spadfs_sync_time;
-		ctx->no_checksums = (fs->mount_flags & MOUNT_FLAGS_CHECKSUMS_OVERRIDE) && !(fs->mount_flags & MOUNT_FLAGS_CHECKSUMS);
-		ctx->checksums = (fs->mount_flags & MOUNT_FLAGS_CHECKSUMS_OVERRIDE) && (fs->mount_flags & MOUNT_FLAGS_CHECKSUMS);
 		if (!(fs->mount_flags & MOUNT_FLAGS_64BIT_INO))
 			ctx->ino64 = 0;
 		else if (!(fs->mount_flags & MOUNT_FLAGS_64BIT_INO_FORCE))
@@ -2351,8 +2303,6 @@ __cold static int spadfs_init_fs_context(struct fs_context *fc)
 		ctx->buffer_size = 0;
 		ctx->prefetch = SPADFS_DEFAULT_METADATA_PREFETCH >> 9;
 		ctx->sync_time = SPADFS_DEFAULT_SYNC_TIME;
-		ctx->no_checksums = false;
-		ctx->checksums = false;
 		ctx->ino64 = 0;
 #ifdef SPADFS_QUOTA
 		ctx->usrquota = false;

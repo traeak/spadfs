@@ -342,8 +342,10 @@ static void copy_apage(SPADFS *fs, APAGE_MAP *dst, APAGE_MAP *src)
  *
  *   xor(half[8 .. half_size)) == CHECKSUM_BASE
  *
- * valid when flags & APAGE_CHECKSUM_VALID. mkspadfs seals with this formula
- * and spadfsck verifies and rewrites with it (sckapage.c).
+ * mkspadfs seals with this formula and spadfsck verifies and rewrites with
+ * it (sckapage.c). Every writer also sets APAGE_CHECKSUM_VALID, but no
+ * reader trusts it: checksums are always on, and a check gated on a bit in
+ * the block it protects is switched off by flipping that bit.
  *
  * The kernel used to clear the flag on its first change to a half and never
  * set it again. Now:
@@ -446,8 +448,7 @@ static APAGE_MAP *map_apage(SPADFS *fs, unsigned ap, int flags,
 		goto read_ok;
 	}
 
-	if (unlikely(fresh[idx]) && likely(check_checksums(fs)) &&
-	    get_head(info->mapping[idx].map)->s.u.l.flags & APAGE_CHECKSUM_VALID &&
+	if (unlikely(fresh[idx]) &&
 	    unlikely(apage_sum(fs, info->mapping[idx].map) != CHECKSUM_BASE)) {
 		spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
 			"bad checksum on apage %Lx (half %u): %02x",
@@ -529,18 +530,14 @@ static void unmap_apage(SPADFS *fs, APAGE_MAP *map, int modified)
 	if (modified) {
 		struct apage_head *head = get_head(map);
 
-		if (likely(make_checksums(fs))) {
-			/*
-			 * The checksum byte lies inside the folded range, so
-			 * folding the current sum into it makes the whole come
-			 * out at CHECKSUM_BASE. The flag is set first: it is in
-			 * the range as well.
-			 */
-			head->s.u.l.flags |= APAGE_CHECKSUM_VALID;
-			head->s.u.l.checksum ^= CHECKSUM_BASE ^ apage_sum(fs, map);
-		} else {
-			head->s.u.l.flags &= ~APAGE_CHECKSUM_VALID;
-		}
+		/*
+		 * The checksum byte lies inside the folded range, so folding
+		 * the current sum into it makes the whole come out at
+		 * CHECKSUM_BASE. The flag is set first: it is in the range as
+		 * well.
+		 */
+		head->s.u.l.flags |= APAGE_CHECKSUM_VALID;
+		head->s.u.l.checksum ^= CHECKSUM_BASE ^ apage_sum(fs, map);
 		mark_apage_dirty(fs, map);
 	}
 	free_apage_buffers(fs, map);

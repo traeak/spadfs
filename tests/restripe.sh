@@ -73,7 +73,7 @@ BASE=""
 make_base() {
 	[ -n "$BASE" ] && return 0
 	BASE="$WORKDIR/rs-base.img"
-	make_image "$BASE" "$SIZE" "--checksums" || die "base image failed"
+	make_image "$BASE" "$SIZE" || die "base image failed"
 	# Prime so the cct has real contents; on a fresh volume it is all zeros
 	# and every cct class is a no-op. Output MUST go to stderr -- it used to
 	# land on stdout and get glued onto a returned path, corrupting a whole

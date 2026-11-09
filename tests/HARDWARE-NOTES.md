@@ -124,3 +124,20 @@ B - A = -11.6 ms/commit (-21%); the ranges do not overlap. Bytes written
 are the same, so one cache flush on this disk costs about 11-12 ms. The
 earlier single-run figures (27, 56.7 and 72.2 ms) used global `sync` and are
 not comparable with these.
+
+## 2026-11-09: checksums always on (Phase 1a of the checksum follow-up)
+
+The `no_checksums`/`checksums` mount options, `mkspadfs --no-checksums` and
+the superblock `NO_CHECKSUMS` flag are gone; the kernel and spadfsck verify
+every block whatever its per-block `*_CHECKSUM_VALID` bit says, and refuse a
+volume with any `flags_compat_fsck` bit set. Root runs by the operator on
+7.3.0_1, all pass:
+
+| Test | What it now covers |
+|---|---|
+| `tests/meta_csum_mount.sh` | new "cleared flag" section: a damaged dnode and a damaged root directory fnode block with their flag cleared are still rejected, and a volume with `flags_compat_fsck` set does not mount; the seal workload adds symlinks, hard links, renames, xattrs, truncation and a fragmented file, and fsck (now flag-blind) agrees with every kernel-written block |
+| `tests/mount_smoke.sh` | section 5 now forces anodes (fill, free every other 64 KiB file, write into the holes) and counts them on disk: at least one, all sealed, all with a valid CRC trailer. Before, it only warned that fsck printed nothing about anodes |
+| `tests/crash_logwrites.sh` | every replayed crash state judged by the flag-blind fsck |
+
+The positive control (the `HEAD` module before this change must fail the
+"cleared flag" section) was not run.

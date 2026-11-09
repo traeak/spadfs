@@ -107,7 +107,7 @@ do {									\
 		/*
 		  checked in check_fnode_block ... this allows delayed recovery
 		  of files from damaged fnodes
-		if (ff(c)->flags & FNODE_BLOCK_CHECKSUM_VALID && __unlikely(__byte_sum(ff(c), FNODE_BLOCK_SIZE) != CHECKSUM_BASE)) {
+		if (__unlikely(__byte_sum(ff(c), FNODE_BLOCK_SIZE) != CHECKSUM_BASE)) {
 			log_printf(0, "%s: BAD CHECKSUM ON FNODE BLOCK %"blk_format"X: %02X", get_filename(p), blk + c, __byte_sum(ff(c), FNODE_BLOCK_SIZE) ^ CHECKSUM_BASE);
 			if (query(qprefix 0, "FIX?")) {
 				update_block(c);

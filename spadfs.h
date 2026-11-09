@@ -491,8 +491,6 @@ struct __spadfs {
 #endif
 };
 
-#define MOUNT_FLAGS_CHECKSUMS_OVERRIDE		0x01
-#define MOUNT_FLAGS_CHECKSUMS			0x02
 #define MOUNT_FLAGS_CLEAR_DIRTY_ON_UNMOUNT	0x04
 #define MOUNT_FLAGS_64BIT_INO			0x08
 #define MOUNT_FLAGS_64BIT_INO_FORCE		0x10
@@ -685,10 +683,6 @@ enum {
 };
 BUFFER_FNS(SpadfsVerified, spadfs_verified)
 
-#define check_checksums(fs)	\
-		(!((fs)->flags_compat_fsck & FLAG_COMPAT_FSCK_NO_CHECKSUMS))
-#define make_checksums(fs)	\
-		(!((fs)->flags_compat_fsck & FLAG_COMPAT_FSCK_NO_CHECKSUMS))
 #define directory_size(fs)	\
 		((fs)->flags_compat_ro & FLAG_COMPAT_RO_DIRECTORY_SIZES)
 

@@ -22,16 +22,14 @@ rel_err:
 		spadfs_brelse(fs, *bhp);
 		return ERR_PTR(-EFSERROR);
 	}
-	if (unlikely(check_checksums(fs))) {
-		if (unlikely(spadfs_meta_verify(tb))) {
-			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-				"bad checksum on tx block %Lx at %s: stored %08x computed %08x",
-				(unsigned long long)fs->txb_sec,
-				msg,
-				spadfs_meta_stored_crc(tb),
-				spadfs_meta_computed_crc(tb));
-			goto rel_err;
-		}
+	if (unlikely(spadfs_meta_verify(tb))) {
+		spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+			"bad checksum on tx block %Lx at %s: stored %08x computed %08x",
+			(unsigned long long)fs->txb_sec,
+			msg,
+			spadfs_meta_stored_crc(tb),
+			spadfs_meta_computed_crc(tb));
+		goto rel_err;
 	}
 	return tb;
 }
@@ -58,26 +56,23 @@ struct fnode_block *spadfs_read_fnode_block(SPADFS *fs, sector_t secno,
 		   spadfs_magic(fs, secno, FNODE_BLOCK_MAGIC))) {
 		if (unlikely(!(struct_type & SRFB_FNODE)))
 			goto bad_magic;
-		/* Regular fnode chain: legacy XOR fold (see the fixed-fnode
-		 * branch below for why the trailer cannot be used here). */
-		if (unlikely(check_checksums(fs)) &&
-		    likely(fnode_block->flags & FNODE_BLOCK_CHECKSUM_VALID)) {
-			start_concurrent_atomic_buffer_read(fs, *bhp);
-			if (likely(fnode_block->flags &
-				   FNODE_BLOCK_CHECKSUM_VALID)) {
-				if (unlikely(__byte_sum(fnode_block, 512) !=
-					     CHECKSUM_BASE)) {
-					end_concurrent_atomic_buffer_read(fs,
-									  *bhp);
-					spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-						"bad checksum on fnode block %Lx at %s",
-						(unsigned long long)secno,
-						msg);
-					goto rel_err;
-				}
-			}
+		/*
+		 * Regular fnode chain: legacy XOR fold (see the fixed-fnode
+		 * branch below for why the trailer cannot be used here).
+		 * Checked whatever FNODE_BLOCK_CHECKSUM_VALID says: every
+		 * writer seals, so the bit is always set on a good block, and
+		 * trusting it would let one flipped bit switch the check off.
+		 */
+		start_concurrent_atomic_buffer_read(fs, *bhp);
+		if (unlikely(__byte_sum(fnode_block, 512) != CHECKSUM_BASE)) {
 			end_concurrent_atomic_buffer_read(fs, *bhp);
+			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+				"bad checksum on fnode block %Lx at %s",
+				(unsigned long long)secno,
+				msg);
+			goto rel_err;
 		}
+		end_concurrent_atomic_buffer_read(fs, *bhp);
 		return fnode_block;
 	}
 	if (likely(SPAD2CPU32_LV(&fnode_block->magic) ==
@@ -99,8 +94,7 @@ struct fnode_block *spadfs_read_fnode_block(SPADFS *fs, sector_t secno,
 		 * checksum current from then on (dir.c), so re-checking every
 		 * lookup would only cost a pass over the entry array.
 		 */
-		if (likely(check_checksums(fs)) &&
-		    unlikely(!buffer_spadfs_verified(*bhp))) {
+		if (unlikely(!buffer_spadfs_verified(*bhp))) {
 			int r = spadfs_verify_dnode(fs, secno, *bhp,
 						    (struct dnode_page *)fnode_block);
 			if (unlikely(r)) {
@@ -127,24 +121,17 @@ struct fnode_block *spadfs_read_fnode_block(SPADFS *fs, sector_t secno,
 		 * so every mount failed with EUCLEAN. Verify the trailer here,
 		 * matching the anode path above.
 		 */
-		if (unlikely(check_checksums(fs)) &&
-		    likely(fnode_block->flags & FNODE_BLOCK_CHECKSUM_VALID)) {
-			start_concurrent_atomic_buffer_read(fs, *bhp);
-			if (likely(fnode_block->flags &
-				   FNODE_BLOCK_CHECKSUM_VALID)) {
-				if (unlikely(spadfs_meta_verify(fnode_block))) {
-					end_concurrent_atomic_buffer_read(fs,
-									  *bhp);
-					spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-						"bad checksum on fixed fnode block %Lx at %s: stored %08x computed %08x",
-						(unsigned long long)secno, msg,
-						spadfs_meta_stored_crc(fnode_block),
-						spadfs_meta_computed_crc(fnode_block));
-					goto rel_err;
-				}
-			}
+		start_concurrent_atomic_buffer_read(fs, *bhp);
+		if (unlikely(spadfs_meta_verify(fnode_block))) {
 			end_concurrent_atomic_buffer_read(fs, *bhp);
+			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+				"bad checksum on fixed fnode block %Lx at %s: stored %08x computed %08x",
+				(unsigned long long)secno, msg,
+				spadfs_meta_stored_crc(fnode_block),
+				spadfs_meta_computed_crc(fnode_block));
+			goto rel_err;
 		}
+		end_concurrent_atomic_buffer_read(fs, *bhp);
 		return fnode_block;
 	}
 bad_magic:
@@ -178,17 +165,14 @@ struct anode *spadfs_read_anode(SPADFS *fs, sector_t secno,
 			msg);
 		goto rel_err;
 	}
-	if (unlikely(check_checksums(fs)) &&
-	    likely(anode->flags & ANODE_CHECKSUM_VALID)) {
-		if (unlikely(spadfs_meta_verify(anode))) {
-			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-				"bad checksum on anode %Lx at %s: stored %08x computed %08x",
-				(unsigned long long)secno,
-				msg,
-				spadfs_meta_stored_crc(anode),
-				spadfs_meta_computed_crc(anode));
-			goto rel_err;
-		}
+	if (unlikely(spadfs_meta_verify(anode))) {
+		spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+			"bad checksum on anode %Lx at %s: stored %08x computed %08x",
+			(unsigned long long)secno,
+			msg,
+			spadfs_meta_stored_crc(anode),
+			spadfs_meta_computed_crc(anode));
+		goto rel_err;
 	}
 	*vx = anode->valid_extents;
 	if (unlikely((unsigned)(*vx - 1) >= ANODE_N_EXTENTS)) {

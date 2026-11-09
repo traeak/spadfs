@@ -319,7 +319,7 @@ do {									\
 		log_printf(1, "THE DEVICE IS UNRELIABLE, MAGIC HAS BEEN CORRECT BEFORE");
 		return 1;
 	}
-	if (f->flags & FNODE_BLOCK_CHECKSUM_VALID && __unlikely(__byte_sum(f, FNODE_BLOCK_SIZE) != CHECKSUM_BASE)) {
+	if (__unlikely(__byte_sum(f, FNODE_BLOCK_SIZE) != CHECKSUM_BASE)) {
 		log_printf(0, "%s: BAD CHECKSUM ON FNODE BLOCK %"blk_format"X: %02X", get_filename(d), blk, __byte_sum(f, FNODE_BLOCK_SIZE) ^ CHECKSUM_BASE);
 		if (query(qprefix 0, "FIX?")) {
 			update_block;
@@ -837,13 +837,12 @@ do {									\
 	if (__unlikely(write_buffer(blk, dnode_page_sectors, dn))) goto read_err;\
 	reread_dnode;							\
 } while (0)
-	if (dn->flags[o] & DNODE_CHECKSUM_VALID) {
-		if (__unlikely(__byte_sum((char *)dn + data, dnode_data_size) != (CHECKSUM_BASE ^ dn->checksum[o]))) {
-			log_printf(0, "%s: BAD CHECKSUM ON DNODE %"blk_format"X: %02X", get_filename(d), blk, __byte_sum((char *)dn + data, dnode_data_size) ^ CHECKSUM_BASE ^ dn->checksum[o]);
-			if (query(qprefix 0, "FIX?")) {
-				dn->checksum[o] = __byte_sum((char *)dn + data, dnode_data_size) ^ CHECKSUM_BASE;
-				update_head;
-			}
+	/* checked whatever DNODE_CHECKSUM_VALID says (struct.h) */
+	if (__unlikely(__byte_sum((char *)dn + data, dnode_data_size) != (CHECKSUM_BASE ^ dn->checksum[o]))) {
+		log_printf(0, "%s: BAD CHECKSUM ON DNODE %"blk_format"X: %02X", get_filename(d), blk, __byte_sum((char *)dn + data, dnode_data_size) ^ CHECKSUM_BASE ^ dn->checksum[o]);
+		if (query(qprefix 0, "FIX?")) {
+			dn->checksum[o] = __byte_sum((char *)dn + data, dnode_data_size) ^ CHECKSUM_BASE;
+			update_head;
 		}
 	}
 	for (i = 0; i < 1 << dnode_hash_bits; ) {

@@ -16,13 +16,25 @@
 #   apage    damage one byte of a sealed apage's active half on disk; the
 #            mount (which reads every apage) must log an apage checksum
 #            error and fail, and spadfsck must report it too
+#   flag     checksums cannot be switched off: clear a dnode's and the root
+#            directory fnode block's CHECKSUM_VALID bit and damage the
+#            payload -- the kernel must still reject both; and a volume with
+#            a bit set in flags_compat_fsck (the removed NO_CHECKSUMS) must
+#            not mount
 #
-# Positive control: a module from before this change (HEAD~1) must fail
-# "seal" -- its dnodes and modified apages come out unsealed:
-#   git worktree add /tmp/spadfs-old HEAD~1
+# The seal workload also runs symlinks, hard links, renames, xattrs,
+# truncation and a fragmented file, so the "spadfsck agrees" check -- fsck
+# verifies every block whatever its flag says -- covers those write paths.
+#
+# Positive controls (build each module in a worktree, then
+# `sudo SPADFS_KO=<dir>/spadfs2.ko bash tests/meta_csum_mount.sh`):
+#   82f4752~1  must fail "seal": its dnodes and modified apages come out
+#              unsealed
+#   the commit before checksums became always-on must fail "flag": it
+#   trusts the cleared bit and mounts the flagged volume
+#   git worktree add /tmp/spadfs-old <commit>
 #   make -C /lib/modules/$(uname -r)/build M=/tmp/spadfs-old \
 #        STANDALONE_BUILD=y CONFIG_SPADFS_FS=m SPADFS_NAME=spadfs2
-#   sudo SPADFS_KO=/tmp/spadfs-old/spadfs2.ko bash tests/meta_csum_mount.sh
 #
 # Usage: sudo bash tests/meta_csum_mount.sh
 # SPADFS_KO selects a module other than the one built in this tree.
@@ -44,7 +56,6 @@ require_tools
 KO=${SPADFS_KO:-$REPO_ROOT/spadfs2.ko}
 MNT="$WORKDIR/mnt"
 LOOP=""
-MARK=0
 
 cleanup() {
 	set +e
@@ -59,11 +70,57 @@ banner() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 attach() { LOOP=$(losetup --find --show "$1"); }
 detach() { [ -n "$LOOP" ] && losetup -d "$LOOP"; LOOP=""; }
 
-# kernel log since the last kmsg_mark
-kmsg_mark() { MARK=$((MARK + 1)); echo "spadfs-meta-csum-mark-$$-$MARK" > /dev/kmsg; }
-kmsg_since() { dmesg | sed -n "/spadfs-meta-csum-mark-$$-$MARK\$/,\$p"; }
+# kernel log since the last kmsg_mark (lib.sh; dies if the marker scrolled out)
+kmsg_mark() { klog_mark; }
+kmsg_since() { klog_since; }
 
 metasum() { python3 "$TESTS_DIR/metasum.py" "$@"; }
+
+# Patch an image in place: clear a CHECKSUM_VALID bit and damage the payload,
+# keeping every other check satisfied so only the cleared bit stands between
+# the damage and a reader that trusts it.
+#   dnode     clear the active version's flag (outside the folded range) and
+#             flip a byte of its entries
+#   rootdir   clear the root directory's first fnode block flag, rebalance
+#             the XOR fold, and flip a payload byte
+#   compat    set bit 0 of flags_compat_fsck and reseal the superblock
+patch_flag() {
+	python3 - "$1" "$2" "$TESTS_DIR" <<'PY'
+import sys
+img, kind, tests = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, tests)
+import metasum, sbinfo
+from corrupt import restripe_trailer
+
+def flip(f, off, mask):
+    f.seek(off); b = f.read(1)[0]; f.seek(off); f.write(bytes([b ^ mask]))
+
+info = sbinfo.read_super(img)
+with open(img, "r+b") as f:
+    if kind == "dnode":
+        vol = metasum.Volume(img)
+        ds = vol.dnode_data_size()
+        for sec, version in vol.dnodes():
+            hdr = sec * 512 + 4 + version
+            if vol.img[hdr] & metasum.DNODE_CHECKSUM_VALID:
+                flip(f, hdr, metasum.DNODE_CHECKSUM_VALID)
+                flip(f, sec * 512 + metasum.DNODE_ENTRY_OFFSET + version * ds + 7, 0x10)
+                break
+        else:
+            sys.exit(1)
+    elif kind == "rootdir":
+        off = (info["root"] + (1 << info["sectors_per_block_bits"])) * 512
+        flip(f, off + 4, 0x01)
+        flip(f, off + 5, 0x01)
+        flip(f, off + 40, 0x20)
+    elif kind == "compat":
+        off = sbinfo.SUPERBLOCK_SECTOR * 512
+        f.seek(off); u = bytearray(f.read(512))
+        u[96] |= 0x01
+        restripe_trailer(u)
+        f.seek(off); f.write(u)
+PY
+}
 field() { metasum "$1" | sed -n "s/^$2=//p"; }
 
 # flip one bit at a byte offset of an image file
@@ -126,11 +183,27 @@ for bs in 512 4096; do
 	mkdir "$MNT/d"
 	for i in $(seq 0 2999); do printf 'x%d\n' "$i" > "$MNT/d/name-$i"; done
 	dd if=/dev/urandom of="$MNT/blob" bs=1M count=4 status=none
+	# other fnode, anode and fixed-fnode write paths
+	mkdir -p "$MNT/e/f/g"
+	ln -s ../d/name-1 "$MNT/e/sym"
+	ln -s "$(printf 'p%.0s' $(seq 1 150))" "$MNT/e/longsym"
+	ln "$MNT/d/name-2" "$MNT/e/hard"
+	mv "$MNT/d/name-3" "$MNT/e/f/moved"
+	setfattr -n user.k -v v1 "$MNT/e/hard" 2>/dev/null || true
+	for i in $(seq 0 63); do
+		dd if=/dev/urandom bs=4k count=1 status=none >>"$MNT/frag-a"
+		dd if=/dev/urandom bs=4k count=1 status=none >>"$MNT/frag-b"
+	done
+	truncate -s 10000 "$MNT/frag-b"
 	sync -f "$MNT"
 	# commit 2: change the same dnodes and apages again (copy-and-reseal)
 	for i in $(seq 0 999); do rm "$MNT/d/name-$i"; done
 	for i in $(seq 3000 3999); do printf 'y%d\n' "$i" > "$MNT/d/name-$i"; done
 	rm "$MNT/blob"
+	rm "$MNT/e/sym"
+	rmdir "$MNT/e/f/g"
+	setfattr -x user.k "$MNT/e/hard" 2>/dev/null || true
+	truncate -s 0 "$MNT/frag-a"
 	sync -f "$MNT"
 	umount "$MNT" || { bad "bs$bs: umount"; detach; continue; }
 	detach
@@ -170,7 +243,7 @@ for bs in 512 4096; do
 			bad "bs$bs: read-only mount failed (the damage is in a dnode, not the mount path)"
 		fi
 		detach
-		log=$(kmsg_since)
+		log=$(kmsg_since) || die "kernel log marker lost; rerun"
 		grep -q "bad checksum on dnode" <<<"$log" \
 			&& ok "bs$bs: the kernel logs the dnode checksum error" \
 			|| bad "bs$bs: no dnode checksum error in the kernel log" "$(tail -3 <<<"$log")"
@@ -195,13 +268,69 @@ for bs in 512 4096; do
 			ok "bs$bs: mount refuses the volume"
 		fi
 		detach
-		log=$(kmsg_since)
+		log=$(kmsg_since) || die "kernel log marker lost; rerun"
 		grep -q "bad checksum on apage" <<<"$log" \
 			&& ok "bs$bs: the kernel logs the apage checksum error" \
 			|| bad "bs$bs: no apage checksum error in the kernel log" "$(tail -3 <<<"$log")"
 	else
 		bad "bs$bs: no sealed apage to damage"
 	fi
+
+	banner "block size $bs: cleared flag"
+	cp "$IMG" "$WORKDIR/fl.img"
+	if patch_flag "$WORKDIR/fl.img" dnode; then
+		attach "$WORKDIR/fl.img"
+		kmsg_mark
+		if mount -t spadfs2 -o ro "$LOOP" "$MNT"; then
+			ls "$MNT/d" >/dev/null 2>&1 \
+				&& bad "bs$bs: a damaged dnode with its flag cleared was listed" \
+				|| ok "bs$bs: a damaged dnode with its flag cleared is still rejected"
+			umount "$MNT"
+		else
+			bad "bs$bs: read-only mount failed (the damage is in a dnode)"
+		fi
+		detach
+		log=$(kmsg_since) || die "kernel log marker lost; rerun"
+		grep -q "bad checksum on dnode" <<<"$log" \
+			&& ok "bs$bs: the kernel logs it as a dnode checksum error" \
+			|| bad "bs$bs: no dnode checksum error for the cleared-flag dnode" "$(tail -3 <<<"$log")"
+	else
+		bad "bs$bs: no sealed dnode to clear"
+	fi
+
+	cp "$IMG" "$WORKDIR/fr.img"
+	patch_flag "$WORKDIR/fr.img" rootdir
+	attach "$WORKDIR/fr.img"
+	kmsg_mark
+	if mount -t spadfs2 -o ro "$LOOP" "$MNT" 2>/dev/null; then
+		ls "$MNT" >/dev/null 2>&1 \
+			&& bad "bs$bs: a damaged root directory block with its flag cleared was listed" \
+			|| ok "bs$bs: a damaged root directory block with its flag cleared is still rejected"
+		umount "$MNT"
+	else
+		ok "bs$bs: a damaged root directory block with its flag cleared stops the mount"
+	fi
+	detach
+	log=$(kmsg_since) || die "kernel log marker lost; rerun"
+	grep -q "bad checksum on fnode block" <<<"$log" \
+		&& ok "bs$bs: the kernel logs it as an fnode block checksum error" \
+		|| bad "bs$bs: no fnode block checksum error for the cleared-flag block" "$(tail -3 <<<"$log")"
+
+	cp "$IMG" "$WORKDIR/fc.img"
+	patch_flag "$WORKDIR/fc.img" compat
+	attach "$WORKDIR/fc.img"
+	kmsg_mark
+	if mount -t spadfs2 -o ro "$LOOP" "$MNT" 2>/dev/null; then
+		bad "bs$bs: a volume with flags_compat_fsck set mounted"
+		umount "$MNT"
+	else
+		ok "bs$bs: a volume with flags_compat_fsck set does not mount"
+	fi
+	detach
+	log=$(kmsg_since) || die "kernel log marker lost; rerun"
+	grep -q "incompatible feature flags" <<<"$log" \
+		&& ok "bs$bs: the kernel names the incompatible flag" \
+		|| bad "bs$bs: no incompatible-flags message" "$(tail -3 <<<"$log")"
 done
 
 summary

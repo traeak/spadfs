@@ -39,18 +39,19 @@ void really_do_fnode_block_checksum(struct fnode_block *fnode_block)
  *
  *   xor(entries[version]) == CHECKSUM_BASE ^ checksum[version]
  *
- * valid when flags[version] & DNODE_CHECKSUM_VALID. The formula is the one
- * spadfsck verifies and repairs with (sckdir.c), so all three readers agree.
+ * The formula is the one spadfsck verifies and repairs with (sckdir.c), so
+ * all three readers agree. The active version is always checked;
+ * DNODE_CHECKSUM_VALID is set by every writer but trusted by no reader (see
+ * the apage note in alloc.c).
  *
  * The kernel used to clear the flag whenever it touched a version and never
  * set it, so only dnodes that fsck had rewritten were ever covered. Now it
  * keeps the active version sealed:
  *
  *   - a new dnode is sealed once its entries are initialised
- *   - begin_modify seals a version it is about to change if it was not
- *     sealed (a volume used with no_checksums, or by an older module), and
- *     when it copies one version into the other it checks the source before
- *     sealing the copy, so a damaged source is reported, not re-blessed
+ *   - when begin_modify copies one version into the other it checks the
+ *     source before sealing the copy, so a damaged source is reported, not
+ *     re-blessed
  *   - every entry write folds the change into the checksum (XOR is linear:
  *     new = old ^ xor(old bytes) ^ xor(new bytes)), so a lookup-heavy
  *     directory never pays for a full pass
@@ -115,22 +116,23 @@ static int spadfs_dnode_seal(SPADFS *fs, sector_t dno, unsigned version)
 	return spadfs_dnode_set_checksum(fs, dno, version, sum);
 }
 
-/* fold an entry write into a sealed version's checksum */
+/*
+ * Fold an entry write into a version's checksum. Unconditional: the flag
+ * lives in the header, outside the folded bytes, so gating on it would let a
+ * flipped flag leave the checksum stale. Before a new dnode is sealed the
+ * folds are meaningless but harmless -- spadfs_dnode_seal overwrites them.
+ */
 static int spadfs_dnode_checksum_delta(SPADFS *fs, sector_t dno,
 				       unsigned version, u8 delta)
 {
 	struct buffer_head *bh;
 	struct dnode_page *d;
 
-	if (unlikely(!make_checksums(fs)))
-		return 0;
 	d = spadfs_read_sector(fs, dno, &bh, 0, "spadfs_dnode_checksum_delta");
 	if (unlikely(IS_ERR(d)))
 		return PTR_ERR(d);
-	if (d->flags[version] & DNODE_CHECKSUM_VALID) {
-		d->checksum[version] ^= delta;
-		mark_buffer_dirty(bh);
-	}
+	d->checksum[version] ^= delta;
+	mark_buffer_dirty(bh);
 	spadfs_brelse(fs, bh);
 	return 0;
 }
@@ -237,19 +239,17 @@ int spadfs_verify_dnode(SPADFS *fs, sector_t dno, struct buffer_head *bh,
 {
 	unsigned version = dnode_version(fs, d);
 
-	if (d->flags[version] & DNODE_CHECKSUM_VALID) {
-		u8 sum;
-		int r = spadfs_dnode_data_sum(fs, dno, version, &sum);
+	u8 sum;
+	int r = spadfs_dnode_data_sum(fs, dno, version, &sum);
 
-		if (unlikely(r))
-			return r;
-		if (unlikely(sum != (CHECKSUM_BASE ^ d->checksum[version]))) {
-			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-				"bad checksum on dnode %Lx (version %u): stored %02x computed %02x",
-				(unsigned long long)dno, version,
-				d->checksum[version], sum ^ CHECKSUM_BASE);
-			return -EFSERROR;
-		}
+	if (unlikely(r))
+		return r;
+	if (unlikely(sum != (CHECKSUM_BASE ^ d->checksum[version]))) {
+		spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+			"bad checksum on dnode %Lx (version %u): stored %02x computed %02x",
+			(unsigned long long)dno, version,
+			d->checksum[version], sum ^ CHECKSUM_BASE);
+		return -EFSERROR;
 	}
 	set_buffer_spadfs_verified(bh);
 	return 0;
@@ -269,17 +269,7 @@ static int spadfs_begin_modify_dnode(SPADFS *fs, sector_t dno)
 	version = dnode_version(fs, d);
 
 	if (CC_CURRENT(fs, &d->cc, &d->txc)) {
-		if (unlikely(!make_checksums(fs))) {
-			d->flags[version] &= ~DNODE_CHECKSUM_VALID;
-			mark_buffer_dirty(bh);
-		} else if (unlikely(!(d->flags[version] & DNODE_CHECKSUM_VALID))) {
-			/* not sealed yet; entry writes keep it current after this */
-			int r;
-
-			spadfs_brelse(fs, bh);
-			r = spadfs_dnode_seal(fs, dno, version);
-			return unlikely(r) ? r : version;
-		}
+		/* verified when read; entry writes keep it sealed from here */
 		spadfs_brelse(fs, bh);
 		return version;
 	} else {
@@ -288,7 +278,6 @@ static int spadfs_begin_modify_dnode(SPADFS *fs, sector_t dno)
 		struct buffer_head *bhfrom, *bhto;
 		unsigned remaining, len;
 		/* the source, checked as it is copied (see the end) */
-		u8 src_sealed = d->flags[version] & DNODE_CHECKSUM_VALID;
 		u8 src_checksum = d->checksum[version];
 		u8 sum = 0;
 		int r;
@@ -357,23 +346,20 @@ copy_again:
 		mark_buffer_dirty(bhto);
 		spadfs_brelse(fs, bhto);
 
-		if (likely(make_checksums(fs))) {
-			/*
-			 * Never seal a copy of damaged entries: that would turn
-			 * detectable corruption into a valid-looking dnode.
-			 */
-			if (src_sealed &&
-			    unlikely(sum != (CHECKSUM_BASE ^ src_checksum))) {
-				spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-					"bad checksum on dnode %Lx (version %u) while copying it: stored %02x computed %02x",
-					(unsigned long long)dno, version,
-					src_checksum, sum ^ CHECKSUM_BASE);
-				return -EFSERROR;
-			}
-			r = spadfs_dnode_set_checksum(fs, dno, version ^ 1, sum);
-			if (unlikely(r))
-				return r;
+		/*
+		 * Never seal a copy of damaged entries: that would turn
+		 * detectable corruption into a valid-looking dnode.
+		 */
+		if (unlikely(sum != (CHECKSUM_BASE ^ src_checksum))) {
+			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+				"bad checksum on dnode %Lx (version %u) while copying it: stored %02x computed %02x",
+				(unsigned long long)dno, version,
+				src_checksum, sum ^ CHECKSUM_BASE);
+			return -EFSERROR;
 		}
+		r = spadfs_dnode_set_checksum(fs, dno, version ^ 1, sum);
+		if (unlikely(r))
+			return r;
 		return version ^ 1;
 	}
 }
@@ -621,14 +607,12 @@ static int spadfs_alloc_dnode_page(SPADFNODE *fn, sector_t hint,
 	}
 	/*
 	 * Version 0 is the active one (cc/txc above are current). Seal it in
-	 * one pass now that every entry is written; the entry writes above
-	 * skipped the incremental update because the flag was still clear.
+	 * one pass now that every entry is written; this replaces whatever the
+	 * entry writes above folded into the still-unsealed checksum.
 	 */
-	if (likely(make_checksums(fs))) {
-		r = spadfs_dnode_seal(fs, al.sector, 0);
-		if (unlikely(r))
-			goto free_return_r;
-	}
+	r = spadfs_dnode_seal(fs, al.sector, 0);
+	if (unlikely(r))
+		goto free_return_r;
 
 	r = spadfs_account_directory_blocks(fn, fs->dnode_page_sectors);
 	if (unlikely(r))

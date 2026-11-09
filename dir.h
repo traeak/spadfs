@@ -10,10 +10,7 @@ void really_do_fnode_block_checksum(struct fnode_block *fnode_block);
 static inline void do_fnode_block_checksum(SPADFS *fs,
 					   struct fnode_block *fnode_block)
 {
-	if (unlikely(make_checksums(fs)))
-		really_do_fnode_block_checksum(fnode_block);
-	else
-		fnode_block->flags &= ~FNODE_BLOCK_CHECKSUM_VALID;
+	really_do_fnode_block_checksum(fnode_block);
 }
 
 /*

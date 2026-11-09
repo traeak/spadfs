@@ -12,8 +12,8 @@
 #      reads it, but a real commit producing it is unverified. If the kernel
 #      computes a different value than fsck expects, EVERY volume the kernel
 #      writes gets flagged.
-#   3. the anode trailer (Cat 2) -- compile-verified only. Anodes do not
-#      exist until files are written, which requires a mount.
+#   3. the anode trailer (Cat 2). Anodes do not exist until a fragmented
+#      file is written, which requires a mount; section 5 counts them on disk.
 #
 # SAFETY: operates only on a throwaway image via a loop device under a
 # private mount point. Refuses to touch anything that already has a
@@ -75,7 +75,7 @@ grep -q spadfs2 /proc/filesystems \
 # ---------------------------------------------------------------------------
 banner "1. format + loop + mount"
 # ---------------------------------------------------------------------------
-make_image "$IMG" 64M "--checksums" || die "make_image failed"
+make_image "$IMG" 64M || die "make_image failed"
 python3 "$TESTS_DIR/prime.py" "$IMG" --cc 1 --base-txc 100 >&2 || die "prime failed"
 check_clean "$IMG" -n || die "formatted+primed volume is not clean before mount"
 ok "volume clean before mount"
@@ -110,12 +110,31 @@ else
 	bad "read-back mismatch"
 fi
 
-# a bigger write forces real extent allocation -> anodes
+# a bigger write: real extent allocation, but on a fresh volume it lands in
+# one contiguous run, which fits in the fnode's own extents -- no anode
 if dd if=/dev/urandom of="$MNT/big.bin" bs=1M count=8 conv=fsync status=none 2>/dev/null; then
-	ok "8 MiB write with fsync (exercises extent/anode allocation)"
+	ok "8 MiB write with fsync"
 else
 	bad "8 MiB fsync write"
 fi
+
+# A fragmented file, which needs anodes: fill the volume with 64 KiB files,
+# free every other one, and write into the holes. The fillers are removed
+# afterwards; the fragmented file keeps its extents.
+n=0
+while [ "$n" -lt 4000 ] &&
+      dd if=/dev/zero of="$MNT/fill.$n" bs=64k count=1 conv=fsync status=none 2>/dev/null; do
+	n=$((n + 1))
+done
+rm -f "$MNT/fill.$n"
+for i in $(seq 0 2 $((n - 1))); do rm -f "$MNT/fill.$i"; done
+sync -f "$MNT"
+if dd if=/dev/urandom of="$MNT/frag.bin" bs=64k count=32 conv=fsync status=none 2>/dev/null; then
+	ok "2 MiB write into $((n / 2)) holes of 64 KiB (needs anodes)"
+else
+	bad "fragmented 2 MiB write"
+fi
+for i in $(seq 1 2 $((n - 1))); do rm -f "$MNT/fill.$i"; done
 
 # nested dirs
 mkdir -p "$MNT/a/b/c" 2>/dev/null && echo x > "$MNT/a/b/c/deep.txt" 2>/dev/null \
@@ -181,15 +200,22 @@ fi
 # ---------------------------------------------------------------------------
 banner "5. anode trailer -- does it actually exist and verify?"
 # ---------------------------------------------------------------------------
-# Anodes are allocated for files with extents. Our 8 MiB file should have made
-# some. If fsck says nothing about them, the trailer code path was never hit.
-if grep -qiE "anode|ANODE" "$OUT2"; then
-	echo "  anode-related fsck output:"
-	grep -iE "anode" "$OUT2" | head -8 | sed 's/^/    /'
-	ok "anode path exercised by fsck"
+# fsck prints nothing about a good anode, so its silence cannot show that an
+# anode exists. Scan the image for them instead (tests/metasum.py): frag.bin
+# must have produced at least one, and every one must carry a valid CRC
+# trailer. fsck's clean verdict above then means it checked them too -- it
+# verifies every anode whatever its flag says.
+AN=$(python3 "$TESTS_DIR/metasum.py" "$IMG" | grep '^anode_')
+echo "$AN" | sed 's/^/    /'
+an_total=$(sed -n 's/^anode_total=//p' <<<"$AN")
+an_bad=$(sed -n 's/^anode_bad=//p' <<<"$AN")
+an_unsealed=$(sed -n 's/^anode_unsealed=//p' <<<"$AN")
+if [ "${an_total:-0}" -gt 0 ] && [ "$an_bad" = 0 ] && [ "$an_unsealed" = 0 ]; then
+	ok "kernel wrote $an_total anode(s), every one sealed with a valid CRC trailer"
+elif [ "${an_total:-0}" -eq 0 ]; then
+	bad "no anodes on disk: the fragmented write did not exercise the anode path"
 else
-	warn "no anode output from fsck -- trailer path may still be unexercised"
-	echo "       check: does the 8MiB file produce anodes at all?"
+	bad "kernel-written anodes failing their CRC ($an_bad) or unsealed ($an_unsealed)"
 fi
 
 # ---------------------------------------------------------------------------
