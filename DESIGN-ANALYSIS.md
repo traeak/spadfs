@@ -37,8 +37,9 @@ spadfsck) and proven by a real mount; `tests/HARDWARE-NOTES.md` has the runs.
 | Symlink limit | 164 characters (was 172): the larger fnode block header took 8 bytes from the EA pool. |
 | Kernel support | Floor raised to 6.1 LTS; `linux-compat.h` is 171 lines. |
 
-Still open: the hash benchmark (Phase 5); sparse files and the symlink limit
-(Phase 6).
+Still open: the directory hash is unkeyed, so crafted names can force long
+leaf chains (Phase 5 measured it; the distribution itself is fine); sparse
+files and the symlink limit (Phase 6).
 
 ---
 
@@ -285,6 +286,29 @@ which is a reasonable band-aid. **I would want a benchmark of ~1M-name directori
 with common prefixes and suffixes before trusting this.** Cheap to test, high
 payoff if it is clustering.
 
+*spadfs2 (measured, `tests/hashsim.py`):* **it does not cluster.** The model
+computes the directory's final shape (the extendible hash's shape does not
+depend on insertion order when names are only added) for 100 000 to 1 000 000
+names from real `/usr` basenames, numbered files, camera names, hex and UUID
+names, maildir names and a long shared prefix/suffix. On all of them the
+current hash gives the same leaf count, fill (54–68%) and lookup depth (3–4
+page reads) as a cryptographic hash; sequential names even pack better (68%
+fill against 61% at 1M). The weak low-bit mixing does not hurt real names.
+
+The weakness is **collisions**, not distribution. The hash is linear: raising
+one byte by 1 and lowering the next by 15 leaves it unchanged (`aP` and `bA`
+hash alike), and such substitutions combine, so 2^k names with one hash are
+trivial to build. 16 384 of them put every name in one leaf chain: 683 leaves,
+346 page reads per lookup on average and 687 at worst, against 3 for a
+cryptographic hash. Anyone who chooses names in a shared directory can do
+this. A finaliser (murmur3 fmix32) does not help -- it is a bijection, so
+equal hashes stay equal -- and an unkeyed replacement such as FNV-1a only
+moves the problem, since its collisions can be computed too. The fix is a
+keyed hash with a per-volume random seed, as ext4 does. Real names collide
+more often than random ones as well (3 960 against 2 256 among 289 128 `/usr`
+names, the 2 256 being case-only pairs every case-folding hash shares), but
+in pairs, which never overflow a leaf.
+
 Also: `& 0xdf` case-folds *unconditionally*, even in `unix_names` mode. `"Foo"`
 and `"foo"` hash identically and are distinguished only by
 `spadfs_compare_names_internal` (`name.c:41`). Intentional — one hash function,
@@ -448,6 +472,12 @@ pure out-of-tree tax. Upstreaming would delete most of it.
    on hot directories. Prealloc mitigates, does not solve.
 4. **Hash quality unverified.** `*15` plus low-bits-first is a known-weak
    combination at the level that matters most. Benchmark before trusting.
+
+   *spadfs2: measured.* No clustering for real or synthetic names up to 1M per
+   directory. But the hash is linear and unkeyed, so identical-hash names are
+   trivial to craft: 16 384 of them make lookups in that directory cost
+   hundreds of page reads (see Bet 3). The fix is a keyed hash with a
+   per-volume seed.
 5. **No ordered iteration.** Structural, not fixable without a second index.
 6. **2^16 crash-count ceiling.** Real operational cliff; needs fsck to clear.
 
@@ -511,5 +541,5 @@ have.
 
 *spadfs2:* the checksum is fixed for every metadata structure, the
 counter table is mirrored, the commit point is now correctly ordered behind its
-metadata, and the txblock has a second copy. The hash benchmark is still
-outstanding.
+metadata, and the txblock has a second copy. The hash benchmark found no
+clustering, but an unkeyed, linear hash whose collisions anyone can craft.
