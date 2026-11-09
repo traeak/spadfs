@@ -1707,7 +1707,8 @@ read_again:
 	fs->sectors_per_fnodepage_bits = sb->sectors_per_fnodepage_bits;
 	fs->sectors_per_page_bits = sb->sectors_per_page_bits;
 	fs->pagesize_bits = fs->sectors_per_page_bits + 9;
-	fs->apage_size = 1U << (fs->pagesize_bits - 1);
+	fs->apage_half = 1U << (fs->pagesize_bits - 1);
+	fs->apage_size = APAGE_USABLE(fs->apage_half);
 	fs->dnode_hash_bits = fs->pagesize_bits - DNODE_PAGE_ENTRY_BITS - 1;
 	fs->dnode_data_size = DNODE_PAGE_ENTRY_SIZE << fs->dnode_hash_bits;
 	fs->dnode_page_sectors = spadfs_roundup_blocksize(fs,
@@ -1720,7 +1721,7 @@ read_again:
 	if (fs->sectors_per_group_bits > sizeof(sector_t) * 8 - 1)
 		fs->sectors_per_group_bits = sizeof(sector_t) * 8 - 1;
 	fs->group_mask = ((sector_t)1 << fs->sectors_per_group_bits) - 1;
-	fs->n_apage_mappings = fs->apage_size >> (fs->sectors_per_buffer_bits + 9);
+	fs->n_apage_mappings = fs->apage_half >> (fs->sectors_per_buffer_bits + 9);
 	if (unlikely(!fs->n_apage_mappings))
 		fs->n_apage_mappings = 1;
 

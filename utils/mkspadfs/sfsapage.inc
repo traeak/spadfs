@@ -8,7 +8,8 @@ char APAGE_ERROR[__MAX_STR_LEN];
 
 int SPAD_APAGE_FREE(struct apage_head *a, __d_off off, __u32 len)
 {
-	int depth = APAGE_SIZE(a->s.u.l.flags);
+	/* entries stop short of the CRC slot at the end of the half */
+	int depth = APAGE_USABLE(APAGE_SIZE(a->s.u.l.flags));
 	if (__likely(!(a->s.u.l.flags & APAGE_BITMAP))) {
 #define aa(i) (*(struct aentry *)((char *)a + (i)))
 		int newblk, preblk, postblk;
@@ -97,7 +98,7 @@ int SPAD_APAGE_MAKE(struct apage_head *a, unsigned n_entries, unsigned sectors_p
 	if (__unlikely(i - SSIZE_BITS > (APAGE_SIZE_BITS >> APAGE_SIZE_BITS_SHIFT))) return -1;
 	if (__unlikely(sectors_per_block_bits > (APAGE_BLOCKSIZE_BITS >> APAGE_BLOCKSIZE_BITS_SHIFT))) return -1;
 	a->s.u.l.flags = ((i - SSIZE_BITS) << APAGE_SIZE_BITS_SHIFT) | (sectors_per_block_bits << APAGE_BLOCKSIZE_BITS_SHIFT);
-	depth = APAGE_SIZE(a->s.u.l.flags);
+	depth = APAGE_USABLE(APAGE_SIZE(a->s.u.l.flags));
 	for (i = sizeof(struct aentry); i < depth; i += sizeof(struct aentry)) {
 		CPU2SPAD64_LV(&aa(i).start, 0);
 		CPU2SPAD32_LV(&aa(i).len, 0);

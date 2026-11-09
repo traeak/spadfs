@@ -189,3 +189,15 @@ Root runs by the operator on 7.3.0_1, all pass: `meta_csum_mount.sh` (the
 driver creates dnodes and rewrites them across two commits, fsck agrees with
 every one, and a damaged dnode is rejected), `crash_logwrites.sh`,
 `mount_smoke.sh`.
+
+## 2026-11-09: apage CRC-32C
+
+Each apage half gives up its last 16-byte entry slot; a CRC-32C over
+[8, half - 4) sits in its last 4 bytes. fs->apage_size is now the usable part
+of a half (every entry walk and bitmap bound), fs->apage_half the full size
+(mapping, copying, checksumming). No structure uses the 8-bit XOR fold any
+more; the apage index still has no checksum. Root runs by the operator on
+7.3.0_1, all pass: `meta_csum_mount.sh` (every driver-written apage half
+sealed and matching, fsck agrees, a damaged apage stops the mount),
+`mount_smoke.sh` (fragmenting fill), `crash_logwrites.sh`, `cc_wrap_mount.sh`
+(fsck's reset pass rewrites every apage).

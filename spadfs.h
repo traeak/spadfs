@@ -371,7 +371,8 @@ struct __spadfs {
 	unsigned char dnode_hash_bits;
 	unsigned char sectors_per_cluster_bits;
 	unsigned char sectors_per_group_bits;
-	unsigned apage_size;
+	unsigned apage_size;	/* usable bytes of a half: APAGE_USABLE(apage_half) */
+	unsigned apage_half;	/* bytes in a half, including the CRC slot */
 	unsigned dnode_data_size;
 	unsigned dnode_page_sectors;
 	unsigned n_apage_mappings;

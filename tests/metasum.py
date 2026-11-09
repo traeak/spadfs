@@ -14,7 +14,8 @@ do) and each dnode's ACTIVE version:
 
 The formulas are the ones spadfsck verifies with (sckapage.c, sckdir.c):
 
-    apage half   xor(half[8:]) == CHECKSUM_BASE
+    apage half   crc32c(half[8:-4]) == the little-endian word at half[-4:]
+                 (the last 16-byte slot is reserved for it, struct.h)
     dnode        crc32c(entries[version]) == the little-endian word at
                  DNODE_CRC_POS = 24 + 2 * data_size + 4 * version (struct.h)
 
@@ -34,7 +35,6 @@ import sys
 import sbinfo
 from prime import crc32c_std, META_COVER
 
-CHECKSUM_BASE = 0x43
 APAGE_MAGIC = 0x5041
 APAGE_CHECKSUM_VALID = 0x40
 DNODE_PAGE_MAGIC = 0x444F4E44
@@ -44,19 +44,6 @@ ANODE_MAGIC = 0x444F4E41
 ANODE_CHECKSUM_VALID = 0x01
 FLAG_COMPAT_NONE_DYNAMIC_MAGIC = 0x2
 
-
-def xor(b):
-    s = 0
-    # fold 8 bytes at a time, then the byte lanes
-    n = len(b) // 8 * 8
-    for (w,) in struct.iter_unpack("<Q", b[:n]):
-        s ^= w
-    for x in b[n:]:
-        s ^= x
-    s ^= s >> 32
-    s ^= s >> 16
-    s ^= s >> 8
-    return s & 0xff
 
 
 class Volume:
@@ -142,7 +129,7 @@ def judge(vol):
         flags = half[8]
         if not flags & APAGE_CHECKSUM_VALID:
             rows.append(("apage", sec, "unsealed"))
-        elif xor(half[8:]) == CHECKSUM_BASE:
+        elif crc32c_std(half[8:-4]) & 0xffffffff == struct.unpack_from("<I", half, len(half) - 4)[0]:
             rows.append(("apage", sec, "good"))
         else:
             rows.append(("apage", sec, "bad"))

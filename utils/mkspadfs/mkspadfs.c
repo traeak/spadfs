@@ -748,7 +748,12 @@ static void write_apages(void)
 	}
 	CPU2SPAD16_LV(&apg->magic, APAGE_MAGIC);
 	apg->s.u.l.flags |= APAGE_CHECKSUM_VALID;
-	apg->s.u.l.checksum = CHECKSUM_BASE ^ __byte_sum(&apg->s, sizeof(struct apage_subhead) + sizeof(struct aentry) * (n_e - 1));
+	apg->s.u.l.checksum = 0;
+	/* CRC-32C trailer over [8, half - 4) -- see APAGE_USABLE in struct.h */
+	{
+		unsigned half = (1 << page_bits) / 2;
+		spadfs_meta_put_crc((__u8 *)apg + APAGE_CRC_POS(half), spadfs_crc32c_std((__u8 *)apg + 8, APAGE_CRC_POS(half) - 8));
+	}
 	write_blocks(buffer, a_sector, page_sectors / 2 < block_sectors ? block_sectors : page_sectors / 2);
 	size_array[used_apages++] = ptr;
 	if (ptr < size) {

@@ -329,7 +329,7 @@ struct apage_index_entry {
 #define  APAGE_SIZE_BITS_SHIFT		0
 #define APAGE_BLOCKSIZE_BITS	0x38
 #define  APAGE_BLOCKSIZE_BITS_SHIFT	3
-#define APAGE_CHECKSUM_VALID	0x40
+#define APAGE_CHECKSUM_VALID	0x40	/* set by every writer, trusted by no reader */
 #define APAGE_BITMAP		0x80
 
 #define APAGE_SIZE(flags)	((1 << SSIZE_BITS) <<			\
@@ -371,6 +371,25 @@ struct aentry {
 	__u16 next;	/* 0 -- head is next (this entry is last) */
 };
 
+/*
+ * Each apage half ends with a CRC-32C. The last aentry-sized slot of the
+ * half is given up for it, so entry offsets stay multiples of
+ * sizeof(struct aentry) and a half still holds a whole number of entries:
+ *
+ *   [0, 8)                         magic/cc/txc (meaningful in half 0 only)
+ *   [8, APAGE_USABLE(half))        subhead and entries, or the bitmap
+ *   [APAGE_USABLE(half), half - 4) zero padding
+ *   [half - 4, half)               CRC-32C over [8, half - 4), little-endian
+ *
+ * The per-half magic/cc/txc are excluded, as they change without the half
+ * changing. The subhead's 8-bit checksum byte is vestigial and zero. Every
+ * entry offset, list walk and bitmap bound uses APAGE_USABLE; only code
+ * that maps, copies or checksums the half as raw bytes uses the full size.
+ */
+#define APAGE_CRC_SLOT		sizeof(struct aentry)
+#define APAGE_USABLE(half)	((half) - APAGE_CRC_SLOT)
+#define APAGE_CRC_POS(half)	((half) - 4)
+
 #define APTR_ALIGN(x)		((__u16)(x) & ~(sizeof(struct aentry) - 1))
 /* APTR_ALIGN must not return number < 0 */
 #define APTR_INVALID(x, asize)	(unlikely((x) & (sizeof(struct aentry) - 1)) ||\
@@ -410,7 +429,7 @@ do {									\
  * instead of splitting it
  */
 #define CONV_APAGE_SECTORS(page_bits, block_bits)		\
-	((((1 << (page_bits)) / 2 - APAGE_HEAD_SIZE) * 8) <<	\
+	((BITMAP_SIZE(APAGE_USABLE((1 << (page_bits)) / 2))) <<	\
 	 ((block_bits) - SSIZE_BITS))
 
 /* minimum sectors in an apage */
@@ -899,9 +918,10 @@ struct dnode_page {
  *
  *   crc[version] at DNODE_CRC_POS(data_size, version)
  *
- * The arrays take 3/4 of the page (data_size = 6 << (page_bits - 4)), so
- * the 8 bytes always fit in the unused tail, and the position is 4-byte
- * aligned, so a CRC never straddles a sector. The CRC covers the entries
+ * The dnode page is the header plus both arrays, rounded up to the block
+ * size; the arrays take 3/4 of a page (data_size = 6 << (page_bits - 4)),
+ * so the rounding always leaves at least 232 spare bytes for the CRCs. The
+ * position is 4-byte aligned, so a CRC never straddles a sector. The CRC covers the entries
  * only, like the 8-bit fold it replaces; the header is checked
  * structurally (magic, page size, up pointer, cc/txc).
  */

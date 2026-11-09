@@ -1,5 +1,11 @@
 #ifndef __SPAD__
 #include "sck.h"
+
+/* CRC-32C of an apage half over [8, half - 4): see APAGE_USABLE in struct.h */
+static __u32 apage_half_crc(const struct apage_head *a, unsigned half)
+{
+	return spadfs_crc32c_std((const __u8 *)a + 8, APAGE_CRC_POS(half) - 8);
+}
 #else
 #include "SCK.H"
 #endif
@@ -229,12 +235,14 @@ do {									\
 			sec += 1 << (super.sectors_per_page_bits - 1);
 		}
 		start = j ? SPAD2CPU64_LV(&apage_index[j - 1].end_sector) : 0;
-		/* checked whatever APAGE_CHECKSUM_VALID says (struct.h) */
+		/* checked whatever APAGE_CHECKSUM_VALID says; CRC trailer per struct.h */
 		{
-			__u8 chs = __byte_sum(&a->s, (1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)) - (sizeof(struct apage_head) - sizeof(struct apage_subhead))) ^ CHECKSUM_BASE;
-			if (__unlikely(chs)) {
+			unsigned half = (1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits));
+			__u32 stored = spadfs_meta_get_crc((__u8 *)a + APAGE_CRC_POS(half));
+			__u32 computed = apage_half_crc(a, half);
+			if (__unlikely(stored != computed)) {
 				if (apage_checks < MAX_SAME_ERRORS) {
-					log_printf(0, "BAD CHECKSUM ON APAGE %u (%"blk_format"X): %02X", j, sec, chs);
+					log_printf(0, "BAD CHECKSUM ON APAGE %u (%"blk_format"X): stored %08X computed %08X", j, sec, stored, computed);
 					if (++apage_checks == MAX_SAME_ERRORS) log_suppress();
 				}
 				goto cont;
@@ -243,6 +251,8 @@ do {									\
 		if (__unlikely((asize = APAGE_SIZE(a->s.u.l.flags)) != (1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits))) || __unlikely(APAGE_SECTORS_PER_BLOCK_BITS(a->s.u.l.flags) != super.sectors_per_block_bits)) {
 			apage_error((0, "APAGE %u (%"blk_format"X) MISREPORTS SIZE (%u != %u) OR BLOCKSIZE (%u != %u)", j, sec, APAGE_SIZE(a->s.u.l.flags), (1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)), APAGE_SECTORS_PER_BLOCK_BITS(a->s.u.l.flags), super.sectors_per_block_bits));
 		}
+		/* from here on: entries and the bitmap stop at the CRC slot */
+		asize = APAGE_USABLE(asize);
 		if (__unlikely(a->s.u.l.flags & APAGE_BITMAP)) {
 			unsigned bmpsize = BITMAP_SIZE(asize);
 			unsigned es;
@@ -454,7 +464,7 @@ static int create_apage(blk_t sec, struct apage_head **aa1, struct apage_head **
 	CPU2SPAD16_LV(&a2->s.u.l.last, 0);
 	CPU2SPAD16_LV(&a2->s.u.l.freelist, sizeof(struct aentry));
 	ae = NULL;	/* warning, go away */
-	for (i = sizeof(struct aentry); i < 1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits); i += sizeof(struct aentry)) {
+	for (i = sizeof(struct aentry); i < APAGE_USABLE(1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)); i += sizeof(struct aentry)) {
 		ae = (struct aentry *)((char *)a2 + i);
 		memset(ae, 0, sizeof(struct aentry));
 		CPU2SPAD16_LV(&ae->next, i + sizeof(struct aentry));
@@ -465,8 +475,10 @@ static int create_apage(blk_t sec, struct apage_head **aa1, struct apage_head **
 
 static int write_apage(blk_t sec, struct apage_head *a1, struct apage_head *a2)
 {
+	unsigned half = (1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits));
 	a2->s.u.l.flags |= APAGE_CHECKSUM_VALID;
-	a2->s.u.l.checksum ^= CHECKSUM_BASE ^ __byte_sum(&a2->s, (1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)) - (sizeof(struct apage_head) - sizeof(struct apage_subhead)));
+	a2->s.u.l.checksum = 0;
+	spadfs_meta_put_crc((__u8 *)a2 + APAGE_CRC_POS(half), apage_half_crc(a2, half));
 	write_buffer(sec + (((unsigned long)a2 - (unsigned long)a1) >> SSIZE_BITS), 1 << (super.sectors_per_page_bits - 1), a2);
 	return 0;
 }
@@ -541,7 +553,7 @@ static int compare_apages(blk_t *lost, blk_t *usedfree, blk_t *lost_runs, blk_t 
 			sec += 1 << (super.sectors_per_page_bits - 1);
 		}
 		if (__unlikely(a->s.u.l.flags & APAGE_BITMAP)) {
-			unsigned bmpsize = BITMAP_SIZE(1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits));
+			unsigned bmpsize = BITMAP_SIZE(APAGE_USABLE(1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)));
 			unsigned bmpl, k;
 			if (__unlikely(end - start > bmpsize << super.sectors_per_block_bits))
 				apage_error((0, "APAGE %u (%"blk_format"X) IS BITMAP AND MAPS TOO LARGE SPACE (%"blk_format"X > %X)", j, sec, end - start, bmpsize << super.sectors_per_block_bits));
@@ -559,7 +571,7 @@ static int compare_apages(blk_t *lost, blk_t *usedfree, blk_t *lost_runs, blk_t 
 			start = end;
 		} else {
 #define aa(i) (*(struct aentry *)((char *)a + (i)))
-			unsigned asize = 1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits);
+			unsigned asize = APAGE_USABLE(1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits));
 			unsigned list = SPAD2CPU16_LV(&aa(0).next);
 			while (list) {
 				blk_t b;
@@ -725,7 +737,7 @@ int fix_apages(void)
 		if (__unlikely(!a2)) {
 			if (__unlikely(i >= n_apages)) panic("fix_apages: all %u apages exhauseted", n_apages);
 			if (__unlikely(r = create_apage(SPAD2CPU64_LV(&apage_index[i].apage), &a1, &a2))) return r;
-			remaining_entries = (1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)) / sizeof(struct aentry) - 1;
+			remaining_entries = APAGE_USABLE(1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)) / sizeof(struct aentry) - 1;
 			remaining_entries -= remaining_entries / FSCK_APAGE_FREE_PERCENTAGE;
 		}
 		if (__unlikely(r = get_blockrun(b, 0, &b_e))) return r;
@@ -753,7 +765,7 @@ int fix_apages(void)
 			    || make_apage_bitmaps
 #endif
 			    ) {
-				unsigned len = ((1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)) - sizeof(struct apage_head)) * 8;
+				unsigned len = BITMAP_SIZE(APAGE_USABLE(1 << (SSIZE_BITS - 1 + super.sectors_per_page_bits)));
 				a2->s.u.b.flags |= APAGE_BITMAP;
 				a2->s.u.b.start0 = MAKE_PART_0(blk);
 				a2->s.u.b.start1 = MAKE_PART_1(blk);

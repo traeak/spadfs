@@ -26,7 +26,7 @@ spadfsck) and proven by a real mount; `tests/HARDWARE-NOTES.md` has the runs.
 
 | Finding | spadfs2 |
 |---|---|
-| 8-bit XOR checksums | **CRC-32C** on the superblock, txblock, userblock, anode and fixed fnode block (512-byte trailer), the fnode block (in a header grown from 24 to 32 bytes, because its fnode chain must tile to byte 512), each dnode version (stored in the unused tail of the dnode page) and the crash-count table (a side CRC region). **Apage halves still use the 8-bit XOR fold**, and the apage index has no checksum at all. |
+| 8-bit XOR checksums | **CRC-32C** on the superblock, txblock, userblock, anode and fixed fnode block (512-byte trailer), the fnode block (in a header grown from 24 to 32 bytes, because its fnode chain must tile to byte 512), each dnode version (stored in the unused tail of the dnode page), each apage half (in its last 16-byte entry slot, given up for it) and the crash-count table (a side CRC region). No structure uses the 8-bit XOR fold any more. **The apage index has no checksum at all.** |
 | Checksum checks gated by a bit in the block, `--no-checksums` | Checksums are always on. Every reader verifies every block whatever its `*_CHECKSUM_VALID` bit says; the option, the mount options and the superblock flag are gone. |
 | Kernel never verified apage or dnode checksums | The kernel seals both on every write and verifies the active half/version when it is read. |
 | `cct[]` single point of failure | A full mirror with its own CRC region and an epoch stamp, kept current by every commit; spadfsck restores from it. |
@@ -37,7 +37,7 @@ spadfsck) and proven by a real mount; `tests/HARDWARE-NOTES.md` has the runs.
 | Symlink limit | 164 characters (was 172): the larger fnode block header took 8 bytes from the EA pool. |
 | Kernel support | Floor raised to 6.1 LTS; `linux-compat.h` is 171 lines. |
 
-Still open: the 8-bit XOR on apages and the unprotected apage index;
+Still open: the unprotected apage index;
 all redundant copies sit near the start of the volume except the superblock's;
 the hash benchmark (Phase 5); sparse files and the symlink limit (Phase 6).
 
@@ -394,8 +394,8 @@ dangerous thing in the tree.
 *spadfs2:* see the status table at the top. In short: CRC-32C everywhere a
 512-byte unit or a side region allows; checksums can no longer be turned off and
 no reader trusts the per-block valid bit; the kernel now seals and verifies
-apages and dnodes. What remains on the 8-bit XOR fold is the apage halves, and
-the apage index has no checksum. `tests/detect.sh` and
+apages and dnodes. Nothing uses the 8-bit XOR fold any more; the apage index
+has no checksum. `tests/detect.sh` and
 `tests/restripe.sh` measure detection per structure and per corruption class,
 and separate what the checksum catches from what structural checks catch.
 
@@ -420,9 +420,8 @@ pure out-of-tree tax. Upstreaming would delete most of it.
 1. **8-bit XOR checksum under a design that trusts it absolutely.** Fix first —
    crc32c per 512 B unit.
 
-   *spadfs2: mostly done.* CRC-32C on every structure except apage halves
-   (still the 8-bit fold, now always sealed and verified) and the apage index
-   (no checksum). Checksums can no longer be switched off.
+   *spadfs2: mostly done.* CRC-32C on every structure except the apage index,
+   which has no checksum. Checksums can no longer be switched off.
 2. **`cct[]` is a single point of failure** with no visible redundancy. A second
    copy of the table — or even just the current epoch's entry, mirrored — costs
    256 KiB and removes the worst failure mode.
@@ -505,7 +504,7 @@ benchmark the hash, and the design becomes genuinely strong. Without those, a ba
 cable doesn't lose you a file — it loses you the ability to tell which files you
 have.
 
-*spadfs2:* the checksum is fixed for every structure but apages, the
+*spadfs2:* the checksum is fixed for every structure but the apage index, the
 counter table is mirrored, the commit point is now correctly ordered behind its
 metadata, and the txblock has a second copy. The hash benchmark is still
 outstanding.

@@ -326,8 +326,9 @@ static void copy_apage(SPADFS *fs, APAGE_MAP *dst, APAGE_MAP *src)
 	unsigned n = fs->n_apage_mappings;
 	unsigned size = 512U << fs->sectors_per_buffer_bits;
 	const unsigned offset = sizeof(struct apage_head) - sizeof(struct apage_subhead);
-	if (unlikely(fs->apage_size < size))
-		size = fs->apage_size;
+	/* the whole half, CRC slot included: the copy carries its seal */
+	if (unlikely(fs->apage_half < size))
+		size = fs->apage_half;
 	spadfs_memcpy((char *)dst[0].entry + offset, (char *)src[0].entry + offset, size - offset);
 	for (i = 1; i < n; i++)
 		spadfs_memcpy(dst[i].entry, src[i].entry, size);
@@ -336,39 +337,58 @@ static void copy_apage(SPADFS *fs, APAGE_MAP *dst, APAGE_MAP *src)
 /*
  * apage checksums.
  *
- * Each half of an apage carries an 8-bit checksum in its subhead, over the
- * half from the subhead to its end -- the per-half magic/cc/txc in front of
- * the subhead are excluded, as they change without the half changing:
+ * Each half of an apage ends with a CRC-32C over the half from the subhead
+ * up to the CRC itself, [8, half - 4); the per-half magic/cc/txc in front of
+ * the subhead are excluded, as they change without the half changing. The
+ * last aentry-sized slot of the half is reserved for it (APAGE_USABLE and
+ * APAGE_CRC_POS in struct.h), which is why fs->apage_size, the bound every
+ * entry walk and bitmap uses, is smaller than fs->apage_half.
  *
- *   xor(half[8 .. half_size)) == CHECKSUM_BASE
- *
- * mkspadfs seals with this formula and spadfsck verifies and rewrites with
+ * mkspadfs seals with this definition and spadfsck verifies and rewrites with
  * it (sckapage.c). Every writer also sets APAGE_CHECKSUM_VALID, but no
- * reader trusts it: checksums are always on, and a check gated on a bit in
- * the block it protects is switched off by flipping that bit.
+ * reader trusts it.
  *
- * The kernel used to clear the flag on its first change to a half and never
- * set it again. Now:
  *   - unmap_apage seals every half it was told was modified, so a half the
  *     kernel has written is always covered;
+ *   - copy_apage copies the whole half, seal included, so a copied half is
+ *     valid even if nothing then changes it;
  *   - map_apage verifies the active half whenever its buffers were freshly
  *     attached, which is every time the contents may have come from disk.
  *     The inactive half is not checked: a crash may leave it torn, and fsck
  *     ignores it too.
  */
-static u8 apage_sum(SPADFS *fs, APAGE_MAP *map)
-{
-	unsigned i;
-	unsigned size = 512U << fs->sectors_per_buffer_bits;
-	const unsigned offset = sizeof(struct apage_head) - sizeof(struct apage_subhead);
-	u8 sum;
 
-	if (unlikely(fs->apage_size < size))
-		size = fs->apage_size;
-	sum = spadfs_xor_bytes((char *)map[0].entry + offset, size - offset);
-	for (i = 1; i < fs->n_apage_mappings; i++)
-		sum ^= spadfs_xor_bytes(map[i].entry, size);
-	return sum;
+/* the bytes of one buffer of a mapped half, and their length */
+static unsigned apage_buf_size(SPADFS *fs)
+{
+	unsigned size = 512U << fs->sectors_per_buffer_bits;
+
+	return unlikely(fs->apage_half < size) ? fs->apage_half : size;
+}
+
+/* the CRC field, in the last buffer of the half */
+static u8 *apage_crc_field(SPADFS *fs, APAGE_MAP *map)
+{
+	unsigned size = apage_buf_size(fs);
+
+	return (u8 *)map[fs->n_apage_mappings - 1].entry + APAGE_CRC_POS(size);
+}
+
+static u32 apage_crc(SPADFS *fs, APAGE_MAP *map)
+{
+	unsigned i, n = fs->n_apage_mappings;
+	unsigned size = apage_buf_size(fs);
+	const unsigned offset = sizeof(struct apage_head) - sizeof(struct apage_subhead);
+	u32 crc = ~0U;
+
+	for (i = 0; i < n; i++) {
+		const u8 *p = (const u8 *)map[i].entry;
+		unsigned from = i ? 0 : offset;
+		unsigned to = i == n - 1 ? APAGE_CRC_POS(size) : size;
+
+		crc = spadfs_crc32c_raw(crc, p + from, to - from);
+	}
+	return ~crc;
 }
 
 static void mark_apage_dirty(SPADFS *fs, APAGE_MAP *map)
@@ -449,11 +469,13 @@ static APAGE_MAP *map_apage(SPADFS *fs, unsigned ap, int flags,
 	}
 
 	if (unlikely(fresh[idx]) &&
-	    unlikely(apage_sum(fs, info->mapping[idx].map) != CHECKSUM_BASE)) {
+	    unlikely(apage_crc(fs, info->mapping[idx].map) !=
+		     spadfs_meta_get_crc(apage_crc_field(fs, info->mapping[idx].map)))) {
 		spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-			"bad checksum on apage %Lx (half %u): %02x",
+			"bad checksum on apage %Lx (half %u): stored %08x computed %08x",
 			(unsigned long long)sec, idx,
-			apage_sum(fs, info->mapping[idx].map) ^ CHECKSUM_BASE);
+			spadfs_meta_get_crc(apage_crc_field(fs, info->mapping[idx].map)),
+			apage_crc(fs, info->mapping[idx].map));
 		free_apage_buffers(fs, info->mapping[0].map);
 		free_apage_buffers(fs, info->mapping[1].map);
 		/*
@@ -531,13 +553,12 @@ static void unmap_apage(SPADFS *fs, APAGE_MAP *map, int modified)
 		struct apage_head *head = get_head(map);
 
 		/*
-		 * The checksum byte lies inside the folded range, so folding
-		 * the current sum into it makes the whole come out at
-		 * CHECKSUM_BASE. The flag is set first: it is in the range as
-		 * well.
+		 * The flag and the vestigial byte are inside the CRC's range,
+		 * so they are set first.
 		 */
 		head->s.u.l.flags |= APAGE_CHECKSUM_VALID;
-		head->s.u.l.checksum ^= CHECKSUM_BASE ^ apage_sum(fs, map);
+		head->s.u.l.checksum = 0;
+		spadfs_meta_put_crc(apage_crc_field(fs, map), apage_crc(fs, map));
 		mark_apage_dirty(fs, map);
 	}
 	free_apage_buffers(fs, map);

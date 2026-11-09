@@ -10,7 +10,6 @@ flags_compat_fsck (the removed NO_CHECKSUMS flag).
 Run: python3 tests/metasum_test.py
 """
 
-import functools
 import os
 import shutil
 import subprocess
@@ -65,11 +64,6 @@ def main():
         img = os.path.join(tmp, "a.img")
         subprocess.run(["bash", "-c", '. "$1/lib.sh"; . "$1/fixtures.sh"; '
                         'make_image "$2" 64M >/dev/null', "x", TESTS, img], check=True)
-
-        b = os.urandom(12288)
-        ok(all(metasum.xor(b[:n]) == functools.reduce(lambda a, c: a ^ c, b[:n], 0)
-               for n in (1, 7, 8, 488, 512, 12288)),
-           "xor fold equals the byte-wise xor (what __byte_sum computes)")
 
         vol = metasum.Volume(img)
         aps = vol.apages()
