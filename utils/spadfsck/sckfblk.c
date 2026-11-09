@@ -99,7 +99,8 @@ do {									\
 				memset(ff(c), 0, FNODE_BLOCK_SIZE);
 				CPU2SPAD32_LV(&ff(c)->magic, magic(blk + c, FNODE_BLOCK_MAGIC));
 				CPU2SPAD32_LV(&ff(c)->txc, 0x80000000U);
-				CPU2SPAD16_LV(&ff(c)->fnodes[1].next, (FNODE_MAX_SIZE & FNODE_NEXT_SIZE) | FNODE_NEXT_FREE);
+				/* one free fnode spanning the unit: fnodes[0], the first after the header */
+				CPU2SPAD16_LV(&ff(c)->fnodes[0].next, (FNODE_MAX_SIZE & FNODE_NEXT_SIZE) | FNODE_NEXT_FREE);
 				update_block(c);
 			} else {
 				goto sys_free_ret_1;
