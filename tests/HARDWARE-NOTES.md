@@ -45,3 +45,56 @@ it faithfully describes an all-zero table -- which is exactly why restoring it
 today would reset the crash count and promote the older alternate of every
 dual-versioned structure. Task 3.2's `Q_IMPORTANT` gate on restore stays until
 the kernel keeps the mirror current.
+
+## 2026-11-08: flush ordering, dm-log-writes crash states, apage/dnode checksums
+
+Root runs by the operator on 7.3.0_1, after `ef221c6` (pre-cct flush),
+`0d4d5db` (dm-log-writes test), `e2b6b4d` (pipefail test fixes) and
+`82f4752` (kernel seals and verifies apage/dnode checksums).
+
+### Current tree: all pass
+
+| Test | Result |
+|---|---|
+| `tests/meta_csum_mount.sh` | pass |
+| `tests/cc_wrap_mount.sh` | pass (first run since its pipefail fixes) |
+| `tests/crash_logwrites.sh` | pass: ordering check and every replayed crash state |
+| `tests/mount_smoke.sh` | pass |
+
+Per-check counts were not recorded. The first `meta_csum_mount.sh` run,
+before the pipefail fix, did record the kernel side in full: at 512 and
+4096 blocks, every active apage half and the dnode the workload produced
+were sealed and matching (`apage_good=1 dnode_good=1`, nothing unsealed),
+fsck accepted every kernel-written checksum, a one-byte flip in the dnode
+failed the directory listing with `bad checksum on dnode` in the kernel
+log, and a flip in the apage failed the mount with `bad checksum on
+apage`. Its 4 failures were the pipefail bug in the test, not fsck.
+
+### Positive controls: both fail as they must
+
+A test that cannot fail proves nothing, so each was run against a module
+built from the commit before the change it guards (`SPADFS_KO=...`, steps
+in each script's header).
+
+**`crash_logwrites.sh` with the pre-flush module (`ef221c6~1`).** The
+ordering check flags every commit; one block size's output:
+
+    FAIL ordering: interval 4 commits the cct together with 8 other write(s), first at byte 9437184 (log entry 75)
+    FAIL ordering: interval 6 commits the cct together with 8 other write(s), first at byte 9441280 (log entry 90)
+    FAIL ordering: interval 8 commits the cct together with 2 other write(s), first at byte 9437184 (log entry 105)
+    FAIL ordering: interval 10 commits the cct together with 56 other write(s), first at byte 9445376 (log entry 114)
+    FAIL ordering: interval 12 commits the cct together with 324 other write(s), first at byte 9961472 (log entry 177)
+
+So on a real device the v1.0.22 commit put the cct in the same flush
+interval as up to 324 metadata writes; the fixed module passes the same
+check. The control's crash-state summary (`states: ... FAILED`) was not
+captured, so whether the old ordering also produced detectably damaged
+crash states is still unrecorded.
+
+**`meta_csum_mount.sh` with the pre-seal module (`82f4752~1`).**
+
+    FAIL  bs512: apage halves unsealed or mismatched
+    FAIL  bs512: dnodes unsealed or mismatched
+
+The old module leaves its apage and dnode unsealed; the current one
+seals both, so the test separates them.
