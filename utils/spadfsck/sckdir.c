@@ -831,19 +831,23 @@ do {									\
 do {									\
 	if (__unlikely(!(dn = read_buffer(blk, dnode_page_sectors, 0)))) goto read_err;\
 } while (0)
+/* CRC-32C of the active version's entries, stored after both arrays (struct.h) */
+#define dnode_crc_field	((__u8 *)dn + DNODE_CRC_POS(dnode_data_size, o))
+#define dnode_crc	spadfs_crc32c_std((char *)dn + data, dnode_data_size)
 #define update_dnode							\
 do {									\
 	dn->flags[o] |= DNODE_CHECKSUM_VALID;				\
-	dn->checksum[o] = __byte_sum((char *)dn + data, dnode_data_size) ^ CHECKSUM_BASE;\
+	dn->checksum[o] = 0;						\
+	spadfs_meta_put_crc(dnode_crc_field, dnode_crc);		\
 	if (__unlikely(write_buffer(blk, dnode_page_sectors, dn))) goto read_err;\
 	reread_dnode;							\
 } while (0)
 	/* checked whatever DNODE_CHECKSUM_VALID says (struct.h) */
-	if (__unlikely(__byte_sum((char *)dn + data, dnode_data_size) != (CHECKSUM_BASE ^ dn->checksum[o]))) {
-		log_printf(0, "%s: BAD CHECKSUM ON DNODE %"blk_format"X: %02X", get_filename(d), blk, __byte_sum((char *)dn + data, dnode_data_size) ^ CHECKSUM_BASE ^ dn->checksum[o]);
+	if (__unlikely(spadfs_meta_get_crc(dnode_crc_field) != dnode_crc)) {
+		log_printf(0, "%s: BAD CHECKSUM ON DNODE %"blk_format"X: stored %08X computed %08X", get_filename(d), blk, spadfs_meta_get_crc(dnode_crc_field), dnode_crc);
 		if (query(qprefix 0, "FIX?")) {
-			dn->checksum[o] = __byte_sum((char *)dn + data, dnode_data_size) ^ CHECKSUM_BASE;
-			update_head;
+			/* the whole page: the CRC is not in the header sector */
+			update_dnode;
 		}
 	}
 	for (i = 0; i < 1 << dnode_hash_bits; ) {

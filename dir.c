@@ -31,39 +31,54 @@ void really_do_fnode_block_checksum(struct fnode_block *fnode_block)
 /*
  * dnode checksums.
  *
- * Each of the two versions of a dnode page has its own 8-bit checksum in the
- * header, over that version's entry array only:
+ * Each of the two versions of a dnode page has a CRC-32C over that version's
+ * entry array, stored after both arrays (DNODE_CRC_POS in struct.h). spadfsck
+ * verifies and repairs with the same definition (sckdir.c). The active
+ * version is always checked; DNODE_CHECKSUM_VALID is set by every writer but
+ * trusted by no reader.
  *
- *   xor(entries[version]) == CHECKSUM_BASE ^ checksum[version]
- *
- * The formula is the one spadfsck verifies and repairs with (sckdir.c), so
- * all three readers agree. The active version is always checked;
- * DNODE_CHECKSUM_VALID is set by every writer but trusted by no reader (see
- * the apage note in alloc.c).
- *
- * The kernel used to clear the flag whenever it touched a version and never
- * set it, so only dnodes that fsck had rewritten were ever covered. Now it
- * keeps the active version sealed:
+ * The kernel keeps the active version sealed:
  *
  *   - a new dnode is sealed once its entries are initialised
  *   - when begin_modify copies one version into the other it checks the
  *     source before sealing the copy, so a damaged source is reported, not
  *     re-blessed
- *   - every entry write folds the change into the checksum (XOR is linear:
- *     new = old ^ xor(old bytes) ^ xor(new bytes)), so a lookup-heavy
- *     directory never pays for a full pass
+ *   - an entry write updates the stored CRC from the changed bytes alone.
+ *     CRC-32C is linear: for an array M of length n and a change d (old
+ *     bytes XOR new bytes) at offset o,
+ *
+ *       crc(M') = crc(M) ^ raw(d followed by n - o - len(d) zero bytes)
+ *
+ *     where raw() is the CRC with no initial or final inversion and a zero
+ *     seed (the inversions cancel, and leading zeros leave a zero seed at
+ *     zero). So a directory split that rewrites thousands of entries never
+ *     re-reads the whole array per entry.
  *
  * Reads verify the active version once per load of the header buffer
  * (spadfs_verify_dnode, BH_SpadfsVerified).
  */
 
-/* xor of the entry array of one version, across every sector it spans */
-static int spadfs_dnode_data_sum(SPADFS *fs, sector_t dno, unsigned version,
-				 u8 *sum)
+/* raw CRC-32C of n zero bytes, continuing from crc */
+static u32 spadfs_crc32c_zeros(u32 crc, unsigned n)
+{
+	static const u8 zeros[512];
+
+	while (n) {
+		unsigned len = n < sizeof zeros ? n : sizeof zeros;
+
+		crc = spadfs_crc32c_raw(crc, zeros, len);
+		n -= len;
+	}
+	return crc;
+}
+
+/* CRC-32C of the entry array of one version, across every sector it spans */
+static int spadfs_dnode_data_crc(SPADFS *fs, sector_t dno, unsigned version,
+				 u32 *crc)
 {
 	unsigned off = DNODE_ENTRY_OFFSET + version * fs->dnode_data_size;
 	unsigned remaining = fs->dnode_data_size;
-	u8 s = 0;
+	u32 c = ~0U;
 
 	while (remaining) {
 		struct buffer_head *bh;
@@ -73,30 +88,75 @@ static int spadfs_dnode_data_sum(SPADFS *fs, sector_t dno, unsigned version,
 		if (len > remaining)
 			len = remaining;
 		data = spadfs_read_sector(fs, dno + (off >> 9), &bh, 0,
-					  "spadfs_dnode_data_sum");
+					  "spadfs_dnode_data_crc");
 		if (unlikely(IS_ERR(data)))
 			return PTR_ERR(data);
-		s ^= spadfs_xor_bytes(data + (off & 511), len);
+		c = spadfs_crc32c_raw(c, data + (off & 511), len);
 		spadfs_brelse(fs, bh);
 		off += len;
 		remaining -= len;
 	}
-	*sum = s;
+	*crc = ~c;
 	return 0;
 }
 
-/* store the checksum of one version, given the xor of its entries */
+/*
+ * The stored CRC of one version. DNODE_CRC_POS is 4-byte aligned, so the
+ * field lies inside one sector.
+ */
+static int spadfs_dnode_get_crc(SPADFS *fs, sector_t dno, unsigned version,
+				u32 *crc)
+{
+	unsigned pos = DNODE_CRC_POS(fs->dnode_data_size, version);
+	struct buffer_head *bh;
+	const u8 *p;
+
+	p = spadfs_read_sector(fs, dno + (pos >> 9), &bh, 0,
+			       "spadfs_dnode_get_crc");
+	if (unlikely(IS_ERR(p)))
+		return PTR_ERR(p);
+	*crc = spadfs_meta_get_crc(p + (pos & 511));
+	spadfs_brelse(fs, bh);
+	return 0;
+}
+
+/* store crc (or, with xor set, fold crc into the stored value) */
+static int spadfs_dnode_put_crc(SPADFS *fs, sector_t dno, unsigned version,
+				u32 crc, int xor)
+{
+	unsigned pos = DNODE_CRC_POS(fs->dnode_data_size, version);
+	struct buffer_head *bh;
+	u8 *p;
+
+	p = spadfs_read_sector(fs, dno + (pos >> 9), &bh, 0,
+			       "spadfs_dnode_put_crc");
+	if (unlikely(IS_ERR(p)))
+		return PTR_ERR(p);
+	p += pos & 511;
+	start_atomic_buffer_modify(fs, bh);
+	if (xor)
+		crc ^= spadfs_meta_get_crc(p);
+	spadfs_meta_put_crc(p, crc);
+	end_atomic_buffer_modify(fs, bh);
+	spadfs_brelse(fs, bh);
+	return 0;
+}
+
+/* store the CRC of one version, and the header's flag and vestigial byte */
 static int spadfs_dnode_set_checksum(SPADFS *fs, sector_t dno,
-				     unsigned version, u8 sum)
+				     unsigned version, u32 crc)
 {
 	struct buffer_head *bh;
 	struct dnode_page *d;
+	int r = spadfs_dnode_put_crc(fs, dno, version, crc, 0);
 
+	if (unlikely(r))
+		return r;
 	d = spadfs_read_sector(fs, dno, &bh, 0, "spadfs_dnode_set_checksum");
 	if (unlikely(IS_ERR(d)))
 		return PTR_ERR(d);
 	start_atomic_buffer_modify(fs, bh);
-	d->checksum[version] = sum ^ CHECKSUM_BASE;
+	d->checksum[version] = 0;
 	d->flags[version] |= DNODE_CHECKSUM_VALID;
 	end_atomic_buffer_modify(fs, bh);
 	spadfs_brelse(fs, bh);
@@ -105,33 +165,29 @@ static int spadfs_dnode_set_checksum(SPADFS *fs, sector_t dno,
 
 static int spadfs_dnode_seal(SPADFS *fs, sector_t dno, unsigned version)
 {
-	u8 sum;
-	int r = spadfs_dnode_data_sum(fs, dno, version, &sum);
+	u32 crc;
+	int r = spadfs_dnode_data_crc(fs, dno, version, &crc);
 
 	if (unlikely(r))
 		return r;
-	return spadfs_dnode_set_checksum(fs, dno, version, sum);
+	return spadfs_dnode_set_checksum(fs, dno, version, crc);
 }
 
 /*
- * Fold an entry write into a version's checksum. Unconditional: the flag
- * lives in the header, outside the folded bytes, so gating on it would let a
- * flipped flag leave the checksum stale. Before a new dnode is sealed the
- * folds are meaningless but harmless -- spadfs_dnode_seal overwrites them.
+ * Fold an entry write into a version's CRC: d is the old entry bytes XOR the
+ * new ones, at byte offset o of the version's array (see the note above).
+ * Unconditional, whatever DNODE_CHECKSUM_VALID says. Before a new dnode is
+ * sealed the folds are meaningless but harmless -- spadfs_dnode_seal
+ * overwrites them.
  */
 static int spadfs_dnode_checksum_delta(SPADFS *fs, sector_t dno,
-				       unsigned version, u8 delta)
+				       unsigned version, unsigned o,
+				       const u8 *d, unsigned len)
 {
-	struct buffer_head *bh;
-	struct dnode_page *d;
+	u32 c = spadfs_crc32c_raw(0, d, len);
 
-	d = spadfs_read_sector(fs, dno, &bh, 0, "spadfs_dnode_checksum_delta");
-	if (unlikely(IS_ERR(d)))
-		return PTR_ERR(d);
-	d->checksum[version] ^= delta;
-	mark_buffer_dirty(bh);
-	spadfs_brelse(fs, bh);
-	return 0;
+	c = spadfs_crc32c_zeros(c, fs->dnode_data_size - o - len);
+	return spadfs_dnode_put_crc(fs, dno, version, c, 1);
 }
 
 static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
@@ -139,7 +195,10 @@ static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
 {
 	struct buffer_head *bh;
 	char *data;
-	u8 delta = 0;	/* xor of the entry bytes before and after a write */
+	/* old entry bytes XOR new ones, for the CRC update after a write */
+	u8 delta[DNODE_PAGE_ENTRY_SIZE];
+	unsigned o = i * DNODE_PAGE_ENTRY_SIZE;	/* offset in the version */
+	unsigned k;
 	i = (i * DNODE_PAGE_ENTRY_SIZE) + DNODE_ENTRY_OFFSET;
 	if (version)
 		i += fs->dnode_data_size;
@@ -157,14 +216,15 @@ static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
 				((struct dnode_page_entry *)data)->b1,
 				((struct dnode_page_entry *)data)->b2);
 		} else {
-			delta = spadfs_xor_bytes(data, DNODE_PAGE_ENTRY_SIZE);
+			memcpy(delta, data, DNODE_PAGE_ENTRY_SIZE);
 			((struct dnode_page_entry *)data)->b0 =
 							MAKE_PART_30(*result);
 			((struct dnode_page_entry *)data)->b1 =
 							MAKE_PART_31(*result);
 			((struct dnode_page_entry *)data)->b2 =
 							MAKE_PART_32(*result);
-			delta ^= spadfs_xor_bytes(data, DNODE_PAGE_ENTRY_SIZE);
+			for (k = 0; k < DNODE_PAGE_ENTRY_SIZE; k++)
+				delta[k] ^= ((u8 *)data)[k];
 		}
 	} else {
 		struct dnode_page_entry dp;
@@ -174,9 +234,10 @@ static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
 			dp.b0 = MAKE_PART_30(*result);
 			dp.b1 = MAKE_PART_31(*result);
 			dp.b2 = MAKE_PART_32(*result);
-			delta ^= spadfs_xor_bytes(data, 512 - (i & 511));
+			memcpy(delta, data, 512 - (i & 511));
 			spadfs_memcpy(data, &dp, 512 - (i & 511));
-			delta ^= spadfs_xor_bytes(data, 512 - (i & 511));
+			for (k = 0; k < 512 - (i & 511); k++)
+				delta[k] ^= ((u8 *)&dp)[k];
 			mark_buffer_dirty(bh);
 		}
 		spadfs_brelse(fs, bh);
@@ -191,11 +252,13 @@ static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
 			       DNODE_PAGE_ENTRY_SIZE - (512 - (i & 511)));
 			*result = MAKE_D_OFF3(dp.b0, dp.b1, dp.b2);
 		} else {
-			unsigned rest = DNODE_PAGE_ENTRY_SIZE - (512 - (i & 511));
+			unsigned first = 512 - (i & 511);
+			unsigned rest = DNODE_PAGE_ENTRY_SIZE - first;
 
-			delta ^= spadfs_xor_bytes(data, rest);
-			spadfs_memcpy(data, (char *)&dp + (512 - (i & 511)), rest);
-			delta ^= spadfs_xor_bytes(data, rest);
+			memcpy(delta + first, data, rest);
+			spadfs_memcpy(data, (char *)&dp + first, rest);
+			for (k = first; k < DNODE_PAGE_ENTRY_SIZE; k++)
+				delta[k] ^= ((u8 *)&dp)[k];
 		}
 	}
 
@@ -204,8 +267,9 @@ static int spadfs_access_dnode(SPADFS *fs, sector_t secno, unsigned version,
 
 	spadfs_brelse(fs, bh);
 
-	if (wr && delta)
-		return spadfs_dnode_checksum_delta(fs, secno, version, delta);
+	if (wr)
+		return spadfs_dnode_checksum_delta(fs, secno, version, o,
+						   delta, DNODE_PAGE_ENTRY_SIZE);
 	return 0;
 }
 
@@ -236,16 +300,18 @@ int spadfs_verify_dnode(SPADFS *fs, sector_t dno, struct buffer_head *bh,
 {
 	unsigned version = dnode_version(fs, d);
 
-	u8 sum;
-	int r = spadfs_dnode_data_sum(fs, dno, version, &sum);
+	u32 crc, stored;
+	int r = spadfs_dnode_data_crc(fs, dno, version, &crc);
 
 	if (unlikely(r))
 		return r;
-	if (unlikely(sum != (CHECKSUM_BASE ^ d->checksum[version]))) {
+	r = spadfs_dnode_get_crc(fs, dno, version, &stored);
+	if (unlikely(r))
+		return r;
+	if (unlikely(crc != stored)) {
 		spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-			"bad checksum on dnode %Lx (version %u): stored %02x computed %02x",
-			(unsigned long long)dno, version,
-			d->checksum[version], sum ^ CHECKSUM_BASE);
+			"bad checksum on dnode %Lx (version %u): stored %08x computed %08x",
+			(unsigned long long)dno, version, stored, crc);
 		return -EFSERROR;
 	}
 	set_buffer_spadfs_verified(bh);
@@ -275,8 +341,8 @@ static int spadfs_begin_modify_dnode(SPADFS *fs, sector_t dno)
 		struct buffer_head *bhfrom, *bhto;
 		unsigned remaining, len;
 		/* the source, checked as it is copied (see the end) */
-		u8 src_checksum = d->checksum[version];
-		u8 sum = 0;
+		u32 src_crc;
+		u32 crc = ~0U;
 		int r;
 
 		start_atomic_buffer_modify(fs, bh);
@@ -284,6 +350,10 @@ static int spadfs_begin_modify_dnode(SPADFS *fs, sector_t dno)
 		CC_SET_CURRENT(fs, &d->cc, &d->txc);
 		end_atomic_buffer_modify(fs, bh);
 		spadfs_brelse(fs, bh);
+
+		r = spadfs_dnode_get_crc(fs, dno, version, &src_crc);
+		if (unlikely(r))
+			return r;
 
 		from = DNODE_ENTRY_OFFSET + version * fs->dnode_data_size;
 		to = DNODE_ENTRY_OFFSET + (version ^ 1) * fs->dnode_data_size;
@@ -309,7 +379,7 @@ copy_again:
 			len = 512 - (to & 511);
 		if (unlikely(remaining < len))
 			len = remaining;
-		sum ^= spadfs_xor_bytes(datafrom, len);
+		crc = spadfs_crc32c_raw(crc, datafrom, len);
 		spadfs_memcpy(datato, datafrom, len);
 		datafrom += len;
 		datato += len;
@@ -347,14 +417,14 @@ copy_again:
 		 * Never seal a copy of damaged entries: that would turn
 		 * detectable corruption into a valid-looking dnode.
 		 */
-		if (unlikely(sum != (CHECKSUM_BASE ^ src_checksum))) {
+		crc = ~crc;
+		if (unlikely(crc != src_crc)) {
 			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
-				"bad checksum on dnode %Lx (version %u) while copying it: stored %02x computed %02x",
-				(unsigned long long)dno, version,
-				src_checksum, sum ^ CHECKSUM_BASE);
+				"bad checksum on dnode %Lx (version %u) while copying it: stored %08x computed %08x",
+				(unsigned long long)dno, version, src_crc, crc);
 			return -EFSERROR;
 		}
-		r = spadfs_dnode_set_checksum(fs, dno, version ^ 1, sum);
+		r = spadfs_dnode_set_checksum(fs, dno, version ^ 1, crc);
 		if (unlikely(r))
 			return r;
 		return version ^ 1;

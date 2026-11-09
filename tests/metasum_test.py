@@ -23,6 +23,7 @@ sys.path.insert(0, TESTS)
 import metasum  # noqa: E402
 import sbinfo  # noqa: E402
 from corrupt import restripe_trailer, restripe_inner_crc  # noqa: E402
+from prime import crc32c_std  # noqa: E402
 
 FSCK = os.path.join(REPO, "spadfsck2")
 PASS = FAIL = 0
@@ -189,6 +190,30 @@ def main():
         patch(an, sec * 512 + 30, lambda x: x ^ 0x08)
         rows = [r for r in metasum.judge(metasum.Volume(an)) if r[0] == "anode"]
         ok(rows == [("anode", sec, "bad")], "a damaged anode is judged bad", str(rows))
+
+        # The dnode scanner: plant a dnode page with a sealed active version
+        # (cc 0 / txc 0 is valid on a fresh volume), then damage an entry.
+        # meta_csum_mount.sh relies on this to judge the kernel's dnodes.
+        dn = os.path.join(tmp, "dnode.img")
+        shutil.copyfile(img, dn)
+        page = vol.page
+        dsec = ((os.path.getsize(dn) // 512 // 2) + 4096) & ~(page // 512 - 1)
+        ds = vol.dnode_data_size()
+        u = bytearray(page)
+        u[0:4] = (metasum.DNODE_PAGE_MAGIC ^ dsec).to_bytes(4, "little")
+        u[4] = metasum.DNODE_CHECKSUM_VALID
+        u[6] = info["sectors_per_page_bits"] - 1          # gflags: page size
+        u[24:24 + ds] = os.urandom(ds)
+        pos = 24 + 2 * ds
+        u[pos:pos + 4] = (crc32c_std(bytes(u[24:24 + ds])) & 0xffffffff).to_bytes(4, "little")
+        with open(dn, "r+b") as f:
+            f.seek(dsec * 512)
+            f.write(u)
+        rows = [r for r in metasum.judge(metasum.Volume(dn)) if r[0] == "dnode"]
+        ok(rows == [("dnode", dsec, "good")], "a sealed dnode is found and judged good", str(rows))
+        patch(dn, dsec * 512 + 24 + ds - 1, lambda x: x ^ 0x01)   # last entry byte
+        rows = [r for r in metasum.judge(metasum.Volume(dn)) if r[0] == "dnode"]
+        ok(rows == [("dnode", dsec, "bad")], "a damaged dnode is judged bad", str(rows))
 
         # The removed NO_CHECKSUMS bit, set and resealed as a writer would.
         nc = os.path.join(tmp, "nocsum.img")

@@ -127,7 +127,8 @@ static int lookup(blk_t blk, blk_t dir_blk, unsigned dir_offset, const char *fil
 			data[rev_bits(idx + i)].b1 = MAKE_PART_31(subblk);
 			data[rev_bits(idx + i)].b2 = MAKE_PART_32(subblk);
 		}
-		dn->checksum[o] = __byte_sum(data, dnode_data_size) ^ CHECKSUM_BASE;
+		dn->checksum[o] = 0;
+		spadfs_meta_put_crc((__u8 *)dn + DNODE_CRC_POS(dnode_data_size, o), spadfs_crc32c_std(data, dnode_data_size));
 		write_buffer(blk, dnode_page_sectors, dn);
 		f = mem_alloc(1 << SSIZE_BITS << super.sectors_per_fnodepage_bits);
 		if (__unlikely(!f)) {

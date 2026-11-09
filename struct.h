@@ -872,6 +872,7 @@ __attribute__((packed))
 
 #define DNODE_PAGE_MAGIC		0x444F4E44
 
+/* set by every writer, trusted by no reader */
 #define DNODE_CHECKSUM_VALID		0x01
 
 		/* used for fsck */
@@ -886,10 +887,26 @@ struct dnode_page {
 	__u64 up_dnode;		/* 0 if top-level */
 	__s32 txc;
 	__u16 cc;
-	__u8 checksum[2];
+	__u8 checksum[2];	/* vestigial 8-bit XOR fields, zero */
 };
 
 #define DNODE_ENTRY_OFFSET		sizeof(struct dnode_page)
+
+/*
+ * Each version's entry array (data_size bytes, starting at
+ * DNODE_ENTRY_OFFSET + version * data_size) is covered by a CRC-32C, stored
+ * little-endian after BOTH arrays:
+ *
+ *   crc[version] at DNODE_CRC_POS(data_size, version)
+ *
+ * The arrays take 3/4 of the page (data_size = 6 << (page_bits - 4)), so
+ * the 8 bytes always fit in the unused tail, and the position is 4-byte
+ * aligned, so a CRC never straddles a sector. The CRC covers the entries
+ * only, like the 8-bit fold it replaces; the header is checked
+ * structurally (magic, page size, up pointer, cc/txc).
+ */
+#define DNODE_CRC_POS(data_size, version)	\
+		(DNODE_ENTRY_OFFSET + 2 * (data_size) + 4 * (version))
 
 /*
  * if (CC_VALID(cc, txc)) the first dnode version is valid
@@ -1305,6 +1322,13 @@ _Static_assert(sizeof(struct apage_head) == sizeof(struct aentry),
 		"apage_head must equal aentry in size -- it is the first array element");
 _Static_assert(sizeof(struct apage_subhead) <= sizeof(struct aentry),
 		"apage_subhead must fit within one aentry slot");
+/*
+ * Both dnode CRCs must fit in the page after the two entry arrays. Checked at
+ * the smallest page validate_super allows (sectors_per_page_bits >= 1, i.e.
+ * 1 KiB); larger pages scale the arrays and the page together.
+ */
+_Static_assert(DNODE_CRC_POS(6 << (10 - 4), 1) + 4 <= 1024,
+		"dnode CRCs do not fit after the entry arrays");
 _Static_assert(DNODE_PAGE_ENTRY_SIZE == 6,
 		"dnode page entry size drifted from its packed 6 bytes");
 /*

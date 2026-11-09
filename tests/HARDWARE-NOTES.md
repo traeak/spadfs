@@ -178,3 +178,14 @@ instead of being replaced by an empty txblock. Root runs by the operator on
 | `tests/mount_smoke.sh` | new section 7: after real mounts both copies verify and match; with the primary damaged the kernel refuses the volume; `spadfsck -y` restores it from the backup; the volume mounts again with its data and checks clean |
 | `tests/crash_logwrites.sh` | every replayed crash state, with the backup written alongside the primary |
 | `tests/meta_csum_mount.sh` | unchanged checks on the new layout |
+
+## 2026-11-09: dnode CRC-32C
+
+Each dnode version's entry array is covered by a CRC-32C stored in the unused
+tail of the dnode page, after both arrays (DNODE_CRC_POS). The driver seals
+new dnodes and copies, checks the active version once per load, and updates
+the CRC on each entry write from the changed bytes alone (CRC linearity).
+Root runs by the operator on 7.3.0_1, all pass: `meta_csum_mount.sh` (the
+driver creates dnodes and rewrites them across two commits, fsck agrees with
+every one, and a damaged dnode is rejected), `crash_logwrites.sh`,
+`mount_smoke.sh`.

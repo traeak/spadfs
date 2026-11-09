@@ -15,7 +15,8 @@ do) and each dnode's ACTIVE version:
 The formulas are the ones spadfsck verifies with (sckapage.c, sckdir.c):
 
     apage half   xor(half[8:]) == CHECKSUM_BASE
-    dnode        xor(entries[version]) == CHECKSUM_BASE ^ checksum[version]
+    dnode        crc32c(entries[version]) == the little-endian word at
+                 DNODE_CRC_POS = 24 + 2 * data_size + 4 * version (struct.h)
 
 Anodes (the extent overflow blocks of fragmented files) carry the 32-bit
 CRC trailer instead: crc32c(block[0:508]) == block[508:512]. Every block with
@@ -147,12 +148,13 @@ def judge(vol):
             rows.append(("apage", sec, "bad"))
     ds = vol.dnode_data_size()
     for sec, version in vol.dnodes():
-        hdr = vol.img[sec * 512:sec * 512 + DNODE_ENTRY_OFFSET]
-        flags, checksum = hdr[4 + version], hdr[22 + version]
+        flags = vol.img[sec * 512 + 4 + version]
         off = sec * 512 + DNODE_ENTRY_OFFSET + version * ds
+        pos = sec * 512 + DNODE_ENTRY_OFFSET + 2 * ds + 4 * version
+        stored = struct.unpack_from("<I", vol.img, pos)[0]
         if not flags & DNODE_CHECKSUM_VALID:
             rows.append(("dnode", sec, "unsealed"))
-        elif xor(vol.img[off:off + ds]) == CHECKSUM_BASE ^ checksum:
+        elif crc32c_std(vol.img[off:off + ds]) & 0xffffffff == stored:
             rows.append(("dnode", sec, "good"))
         else:
             rows.append(("dnode", sec, "bad"))
