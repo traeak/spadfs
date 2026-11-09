@@ -136,10 +136,53 @@ Findings so far (from reading `file.c`, not yet written up):
   punch and fill holes; xfstests' sparse/fallocate groups as the acceptance
   test.
 
+**Expected performance impact** (design-stage reasoning, nothing measured;
+assumes the copy-on-write map with two roots, holes as `blk == 0` extents,
+and the in-place append path kept):
+
+- **Only files with holes use the new map ("tree mode").** Today a small
+  file's first two extents live in its fnode, so reading it needs no
+  metadata beyond the directory entry. Putting every file in tree mode would
+  cost every cold file read at least one anode read and erase much of the
+  small-file lead over ext4/XFS (40-90% on create/stat/unlink in
+  `tests/HARDWARE-NOTES.md`). A file should switch on its first hole; dense
+  files -- nearly all files -- then cost nothing.
+- **Gains:** growing a file past EOF (`truncate -s`, seek-and-write) becomes
+  one metadata update instead of writing the gap as zeros (today
+  `generic_cont_expand_simple` writes every zero block); holes read as zeros
+  without I/O; `SEEK_HOLE`/`SEEK_DATA` let `cp`, `tar`, `rsync` skip holes;
+  VM images and database files can be created at full size without
+  allocating it.
+- **Costs, concentrated in random writes into holes:**
+  - The first write into a hole within a commit copies the anodes on its
+    path (1-3 blocks of 512 bytes, by tree depth); later writes to that path
+    in the same commit are in place. So more metadata is written per commit
+    when random writes touch many paths, but there are no extra flushes.
+    ext4 pays similarly, writing changed extent blocks to its journal and
+    then in place; copy-on-write writes them once.
+  - Each random 4 KiB write into a hole is its own extent; at 30 extents per
+    anode a scattered file grows a deeper tree, so cold lookups read more
+    anodes (the per-inode extent cache hides this when warm).
+  - No delayed allocation: blocks are allocated in write order, so randomly
+    filled files scatter across the disk and later sequential reads slow
+    down. Allocate near the logical neighbour's blocks to mitigate.
+  - Punch hole and truncate also take the copy-on-write path: a few more
+    metadata writes than today's in-place trim.
+  - spadfsck time grows with extent count.
+  - The two-versions-per-anode alternative would hold 15 extents per
+    version instead of 30, deepening trees sooner -- a reason to prefer
+    copy-on-write.
+- **Benchmark phases to add to `tests/bench_ab.sh`** (against ext4 and XFS):
+  random 4 KiB writes into a large sparse file with fsync (database/VM
+  pattern -- where the costs show); `truncate -s` up to a large size (where
+  the gain should be large); `cp --sparse` of a mostly empty file; and the
+  existing small-file phases re-run to prove the dense fast path did not
+  regress.
+
 Write this up as `docs/superpowers/plans/<date>-phase6-sparse-files.md` with
 the options, the crash argument for the chosen one, the on-disk changes in
-all three readers, the tests, and an effort estimate -- then decide with the
-operator whether to build it.
+all three readers, the tests, the performance impact above, and an effort
+estimate -- then decide with the operator whether to build it.
 
 ---
 
