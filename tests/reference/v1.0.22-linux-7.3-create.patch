@@ -1,0 +1,42 @@
+commit 9b9a5ee66b9a26c3f9a8d27f4624c10f3b7da677
+Author: Brian Olsen <bnolsen@gmail.com>
+Date:   Fri Oct 30 20:33:29 2026 -0600
+
+    fix(kernel): build on 7.3 -- ->create lost its bool excl argument
+    
+    Linux 7.3 dropped the trailing bool from inode_operations->create:
+    
+      int (*create)(struct mnt_idmap *, struct inode *, struct dentry *, umode_t);
+    
+    spadfs_create only gated the last argument on < 3.6 (nameidata vs excl),
+    so on 7.3 the .create initialiser at namei.c:1169 failed with
+    -Wincompatible-pointer-types and spadfs2.ko did not build on the running
+    kernel. Add a < 7.3 bound on the excl argument. Neither nd nor excl is used
+    in the body, so behaviour is unchanged.
+    
+    Verified: full spadfs2.ko build on 7.3.0_1 and 6.18.59_1, each with only
+    the known MODULE_DESCRIPTION() warning; tests/mount_smoke.sh on 7.3.0_1:
+    17 passed, 0 failed.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/namei.c b/namei.c
+index aa9e140..ba1b260 100644
+--- a/namei.c
++++ b/namei.c
+@@ -338,11 +338,11 @@ static int spadfs_create(
+ 			 struct mnt_idmap *ns,
+ #endif
+ 			 struct inode *dir, struct dentry *dentry,
+-			 mode_type mode,
++			 mode_type mode
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(3,6,0)
+-			 struct nameidata *nd
+-#else
+-			 bool excl
++			 , struct nameidata *nd
++#elif LINUX_VERSION_CODE < KERNEL_VERSION(7,3,0)
++			 , bool excl
+ #endif
+ 			 )
+ {

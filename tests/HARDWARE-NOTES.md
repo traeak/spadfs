@@ -275,3 +275,92 @@ both readers reject on a non-file; and nothing wrote the fnode after the
 target -- the driver writes a file's fnode on extend, fsync, truncate,
 setattr and close, and a symlink is never opened -- so the size and runs
 were never recorded (12 lost sectors at 512-byte blocks).
+
+## 2026-11-09: spadfs2 against v1.0.22 (side-by-side rig)
+
+`tests/build_reference.sh` builds v1.0.22 (59e33f2, plus only the 7.3
+`->create` compile fix in `tests/reference/`) as spadfs.ko / type "spadfs";
+`tests/bench_ab.sh` alternates it with spadfs2 on `/dev/sda1` (WDC
+WD5000LPVX, rotational), reformatting every round. 3 rounds, 50 commits,
+20 000 files, 256 MB. Operator's run on 7.3.0_1, medians:
+
+| Metric | v1.0.22 | spadfs2 | B vs A |
+|---|---|---|---|
+| commit (ms) | 22.83 | 34.76 | +52% |
+| create 20k + sync (s) | 1.01 | 1.07 | +6% |
+| cold stat 20k (s) | 0.08 | 0.11 | +38% |
+| unlink 20k + sync (s) | 0.06 | 0.09 | +50% |
+| seq write (MB/s) | 98.7 | 95.7 | -3% |
+| seq read, cold (MB/s) | 102.9 | 99.8 | -3% |
+
+- Commit: +11.9 ms, consistent within 1 ms across rounds -- the one cache
+  flush added before the cct write (11.6 ms measured earlier) plus ~0.3 ms
+  of cct CRC and mirror writes. A correctness fix: v1.0.22 could commit
+  before its metadata reached the media.
+- create/unlink: tens of ms over 20 000 files (~3 us per file), consistent
+  with per-modification CRC sealing, SipHash and dnode CRC updates, plus the
+  one extra flush in each phase's final sync.
+- cold stat: +30 ms over 20 000 files; candidate causes are the keyed hash
+  packing sequential names less densely (~62% vs 68% leaf fill in
+  tests/hashsim.py, so ~10% more directory pages) and CRC checks on every
+  directory block read. Durations are near the script's 0.01 s
+  resolution; rerun with -f 200000 to confirm the percentage.
+- write/read: the control (identical data path). Write is consistently 3%
+  lower, reads overlap; most likely the file's position on the disk (outer
+  tracks are faster) under the two layouts. Not yet checked with filefrag.
+
+Rerun at 200 000 files (`-f 200000`), medians:
+
+| Metric | v1.0.22 | spadfs2 | B vs A |
+|---|---|---|---|
+| commit (ms) | 22.83 | 34.76 | +52% |
+| create 200k + sync (s) | 11.37 | 14.75 | +30% |
+| cold stat 200k (s) | 2.87 | 2.81 | -2% |
+| unlink 200k + sync (s) | 0.78 | 0.93 | +19% |
+| seq write (MB/s) | 97.1 | 95.4 | -2% |
+| seq read, cold (MB/s) | 102.5 | 102.5 | 0% |
+
+- cold stat: no regression; the +38% at 20k was the script's resolution.
+- create: the per-file cost grows with directory size (+3 us/file at 20k,
+  +17 us/file at 200k), so it is not the fixed per-file CPU work (CRCs,
+  SipHash). Leading hypothesis, unconfirmed: building a large directory
+  forces commits partway through, each now one flush (~12 ms) dearer;
+  ~280 of them would explain the 3.4 s. The block layer's flush counters
+  (field 15 of /sys/class/block/{sda,sda1}/stat) read 0 on this kernel, so
+  counting flushes per phase needs block tracing (block_rq_issue).
+
+## 2026-11-09: spadfs2 against ext4 and XFS
+
+`tests/bench_ab.sh ./spadfs2.ko spadfs2 ./mkspadfs2 - ext4,noinit_itable
+'mkfs.ext4 -F -q' - xfs 'mkfs.xfs -f -q'` on `/dev/sda1` (WDC WD5000LPVX,
+rotational), 3 rounds, side order rotated, fresh mkfs every time; 50
+commits, 20 000 files, 50 fsyncs per writer, 256 MB. Defaults otherwise
+(ext4 data=ordered; ext4 mounted noinit_itable so its background inode-table
+init does not run during the measurements). Operator's run on 7.3.0_1,
+medians:
+
+| Metric | spadfs2 | ext4 | XFS |
+|---|---|---|---|
+| commit, syncfs (ms) | 34.54 | 85.98 | 34.67 |
+| create 20k + sync (s) | 1.05 | 1.86 | 1.80 |
+| cold stat 20k (s) | 0.11 | 0.18 | 0.37 |
+| unlink 20k + sync (s) | 0.09 | 0.33 | 0.95 |
+| fsync, 1 writer (ops/s) | 30 | 18 | 27 |
+| fsync, 8 writers (ops/s) | 51 | 40 | 58 |
+| seq write (MB/s) | 98.4 | 98.9 | 98.6 |
+| seq read, cold (MB/s) | 103.8 | 104.1 | 108.9 |
+
+- Single-threaded metadata work (create, cold stat, unlink) is 40-90%
+  faster than both: the inode-in-directory design, with no inode table to
+  allocate in, read or free.
+- Commit and 1-writer fsync match XFS and beat ext4 (ext4's commit varied
+  86-130 ms across rounds).
+- Parallel fsync: XFS leads by 14%. Scaling from 1 to 8 writers: spadfs2
+  1.7x, ext4 2.2x, XFS 2.1x -- consistent with spadfs2's single
+  filesystem-wide lock; on this disk every writer mostly waits on flushes,
+  so fast storage would likely widen the gap.
+- Data throughput equal; XFS's +5% read is most likely file placement.
+- Not covered: directories of 200k+ names (spadfs2's create cost grows with
+  directory size, see above), SSD/NVMe, many cores, aged volumes, and equal
+  crash guarantees for file data (spadfs2's data ordering is the open
+  question in docs/superpowers/plans/2026-11-09-next-steps-after-review.md).
