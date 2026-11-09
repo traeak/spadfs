@@ -72,6 +72,9 @@ def read_super(path):
     for name, off, fmt in FIELDS:
         (val,) = struct.unpack_from(endian + fmt, sb, off)
         out[name] = val
+    # derived: which layout mkspadfs chose for the cct backup (near the
+    # primary at the start, or at the end beside the superblock backup)
+    out["cct_backup_at_end"] = int(out["cct_backup"] > out["size"] // 2)
     return out
 
 

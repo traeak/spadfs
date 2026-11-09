@@ -216,3 +216,29 @@ operator on 7.3.0_1, all pass:
 
 The other mount tests use 64 MiB volumes, where a full list apage converts
 to a bitmap instead of splitting, so they never reach the index write.
+
+## 2026-11-09: backups at the end of the volume -- commit cost
+
+mkspadfs first moved the cct backup, its CRC region and the txblock backup to
+the end of the volume. Same module, layouts alternated with
+`tests/commit_cost_ab.sh --mkfs-a <HEAD mkspadfs2> --mkfs-b <new mkspadfs2>`
+on `/dev/sda1` (WDC WD5000LPVX, rotational), 5 rounds of 100 commits:
+
+| Layout | Median ms/commit | Range | KiB/commit |
+|---|---|---|---|
+| A: backups next to the primaries | 34.0 | 33.3-34.1 | 42.7 |
+| B: backups at the end | 89.3 | 89.2-91.2 | 42.9 |
+
++55.3 ms per commit (+163%): the cct backup is written synchronously after
+every commit, so each commit sends the head to the far end and back. The
+txblock backup is written rarely and costs nothing measurable there. So
+mkspadfs now chooses per device: the txblock backup always at the end, the
+cct backup at the end on non-rotating devices and image files and next to
+the primary on rotating disks (sysfs queue/rotational, via the parent disk
+for a partition), with --cct-backup-far/--cct-backup-near to override. All
+root tests passed with both backups at the end (mount_smoke, cct_mirror_mount,
+cct_crc_mount, crash_logwrites, meta_csum_mount).
+
+Re-run after the per-device choice (B now picks the near cct backup on
+`/dev/sda1` by itself, txblock backup at the end): both medians around 34 ms
+per commit, within noise, as reported by the operator.

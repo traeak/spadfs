@@ -72,13 +72,15 @@ error(int x, int y, char *m, ...)
 	4002+2*apage_index_sectors,n_apages*page_size (apages_sector) -- apages
 	apages_sector+n_apages*page_size,512 (cct_sector) -- txc table
 	cct_sector+CCT_SECTORS -- cct_crc_sector, CCT_CRC_UNITS of side CRCs
-	cct_crc_sector+cct_crc_sectors -- cct_backup_sector, CCT_SECTORS (Phase 3)
-	cct_backup_sector+CCT_SECTORS -- cct_backup_crc_sector, same CRC geometry
-	cct_backup_crc_sector+cct_crc_sectors -- txblock_backup_sector, one block
-	txblock_backup_sector+block_sectors -- root fnode
+	cct_crc_sector+cct_crc_sectors -- root fnode
 	64 (ROOT_DIR) -- root directory
 	-- free space
-	superblock backup
+	tail_sector (= cct_backup_sector), CCT_SECTORS -- cct backup (Phase 3)
+	cct_backup_crc_sector, cct_crc_sectors -- its CRC region
+		(or both right after cct_crc, before the root fnode, on a
+		rotating disk or with --cct-backup-near; see check_valid)
+	txblock_backup_sector, one block -- txblock backup
+	size -- superblock backup
 */
 
 #define BUFFER_SIZE		CCT_SIZE
@@ -115,6 +117,13 @@ static const char *smallfile_groupsize_str = NULL;
 static __u64 groups;
 static int metadata_groups;
 static int smallfile_groups;
+
+/*
+ * Where the cct backup goes: 1 = at the end of the volume, 0 = next to the
+ * primary, -1 = choose by device (cct_backup_placement). See the layout
+ * comment in check_valid.
+ */
+static int cct_backup_far = -1;
 
 static int trim =
 #ifdef __SPAD__
@@ -166,6 +175,7 @@ static __u64 cct_crc_sectors;	/* CCT_CRC_UNITS rounded up to whole blocks */
 static __u64 cct_backup_sector;	/* Phase 3: mirror of the crash-count table */
 static __u64 cct_backup_crc_sector;
 static __u64 txblock_backup_sector;	/* second copy of the txblock */
+static __u64 tail_sector;		/* start of the backups at the end; free space ends here */
 /* CRC-32C of apage index 0, for the txblock (struct txblock, apage_index_crc) */
 static __u32 apage_index_crc0;
 static __u64 root_fnode_sector;
@@ -204,6 +214,55 @@ static _syscall5(int, _llseek, uint, fd, ulong, hi, ulong, lo, loff_t *, res, ui
 #endif
 
 static __s64 get_number_percent(const char *a, char *num_error, __s64 total);
+
+#ifndef __SPAD__
+/*
+ * 1 if h is a block device on a rotating disk, 0 if it is a non-rotating one
+ * or not a block device (an image file), -1 if it cannot be told. A
+ * partition has no queue/ of its own in sysfs; its parent disk's is used.
+ */
+static int device_rotational(void)
+{
+	struct stat st;
+	char path[96];
+	FILE *f;
+	int v;
+	if (fstat(h, &st) || !S_ISBLK(st.st_mode)) return 0;
+	snprintf(path, sizeof path, "/sys/dev/block/%u:%u/queue/rotational", major(st.st_rdev), minor(st.st_rdev));
+	if (!(f = fopen(path, "r"))) {
+		snprintf(path, sizeof path, "/sys/dev/block/%u:%u/../queue/rotational", major(st.st_rdev), minor(st.st_rdev));
+		if (!(f = fopen(path, "r"))) return -1;
+	}
+	if (fscanf(f, "%d", &v) != 1) v = -1;
+	fclose(f);
+	return v < 0 ? -1 : v != 0;
+}
+#endif
+
+/*
+ * The cct backup is written after every commit. At the end of the volume it
+ * survives damage to the start of the disk, but on a rotating disk every
+ * commit then pays a seek to the far end and back (+55 ms per commit
+ * measured on a laptop SATA disk, 34 -> 89 ms). So by default it goes far
+ * on non-rotating devices and near on rotating ones; --cct-backup-far and
+ * --cct-backup-near override. Readers follow the superblock pointers, so
+ * both layouts are the same format.
+ */
+static void cct_backup_placement(void)
+{
+	const char *why = "requested";
+	if (cct_backup_far == -1) {
+#ifndef __SPAD__
+		int rot = device_rotational();
+		cct_backup_far = rot == 0;
+		why = rot == 1 ? "rotating disk" : rot == 0 ? "non-rotating device or image file" : "device type unknown";
+#else
+		cct_backup_far = 1;
+		why = "default";
+#endif
+	}
+	fprintf(stderr, "\rcrash count table backup: %s (%s)\n", cct_backup_far ? "at the end of the volume" : "next to the primary", why);
+}
 
 static void check_valid(void)
 {
@@ -360,17 +419,30 @@ static void check_valid(void)
 	cct_crc_sectors = ((CCT_CRC_UNITS + block_sectors - 1) / block_sectors) * block_sectors;
 
 	/*
-	 * Phase 3: the cct mirror. Placed after the primary's CRC region and
-	 * before the root fnode, each boundary block-aligned for the same reason
-	 * the CRC region is: a short unaligned gap here becomes an unaligned
-	 * apage entry that fsck rejects. root_fnode then follows the mirror's
-	 * own CRC region, so the whole cct complex stays contiguous.
+	 * The backups. The txblock backup always goes at the END of the
+	 * volume, just below the superblock's own backup at sector `size`, so
+	 * that damage to the start of the disk cannot take out the primary and
+	 * its copy together; it is written rarely, so the distance costs
+	 * nothing. The cct backup and its CRC region go there too when
+	 * cct_backup_far (see cct_backup_placement), else right after the
+	 * primary's CRC region. Counted down from `size`, which is
+	 * block-aligned, so every boundary is too (CCT_BACKUP_SECTORS and
+	 * cct_crc_sectors are whole blocks). Whatever sits at the end stays
+	 * inside the filesystem and is left out of the free space, so fsck's
+	 * extend leaves it where it is.
 	 */
-	cct_backup_sector = block_align(cct_crc_sector + cct_crc_sectors);
-	cct_backup_crc_sector = block_align(cct_backup_sector + CCT_BACKUP_SECTORS);
-	/* the txblock's backup: a whole block, so the next boundary stays aligned */
-	txblock_backup_sector = cct_backup_crc_sector + cct_crc_sectors;
-	root_fnode_sector = txblock_backup_sector + block_sectors;
+	txblock_backup_sector = size - block_sectors;
+	if (cct_backup_far) {
+		root_fnode_sector = cct_crc_sector + cct_crc_sectors;
+		cct_backup_crc_sector = txblock_backup_sector - cct_crc_sectors;
+		cct_backup_sector = cct_backup_crc_sector - CCT_BACKUP_SECTORS;
+		tail_sector = cct_backup_sector;
+	} else {
+		cct_backup_sector = cct_crc_sector + cct_crc_sectors;
+		cct_backup_crc_sector = cct_backup_sector + CCT_BACKUP_SECTORS;
+		root_fnode_sector = cct_backup_crc_sector + cct_crc_sectors;
+		tail_sector = txblock_backup_sector;
+	}
 	root_dir_sector = fnode_align(root_fnode_sector + block_sectors, ROOT_DIR_SECTORS);
 }
 
@@ -745,14 +817,16 @@ static void write_apages(void)
 	if (free_range(apg, root_fnode_sector + block_sectors, root_dir_sector - (root_fnode_sector + block_sectors))) goto err;
 	ptr = root_dir_sector + ROOT_DIR_SECTORS;
 	next_block:
-	if (ptr > size) error(2, 0, "\rtoo small filesystem");
+	/* free space ends at the backups (tail_sector); the last apage still covers to size */
+	if (ptr > tail_sector) error(2, 0, "\rtoo small filesystem");
 	s = ((__u64)1 << 32) - block_size / 512;
-	if (ptr + s > size) s = size - ptr;
-	r = free_range(apg, ptr, s);
+	if (ptr + s > tail_sector) s = tail_sector - ptr;
+	r = s ? free_range(apg, ptr, s) : 0;
 	if (r < 0) goto err;
 	if (!r) {
 		ptr += s;
-		if (ptr < size) goto next_block;
+		if (ptr < tail_sector) goto next_block;
+		ptr = size;
 	}
 	CPU2SPAD16_LV(&apg->magic, APAGE_MAGIC);
 	apg->s.u.l.flags |= APAGE_CHECKSUM_VALID;
@@ -911,6 +985,10 @@ int main(int argc, const char * const argv[])
 		char num_error;
 		if (skip) goto is_file;
 		if (0) {
+		} else if (!strcasecmp(*arg, "--cct-backup-far")) {
+			cct_backup_far = 1;
+		} else if (!strcasecmp(*arg, "--cct-backup-near")) {
+			cct_backup_far = 0;
 		} else if (!strcasecmp(*arg, "--trim")) {
 			trim = 1;
 		} else if (!strcasecmp(*arg, "--no-trim")) {
@@ -1003,6 +1081,7 @@ int main(int argc, const char * const argv[])
 	h = open(file, O_RDWR | O_EXCL);
 	if (h < 0) error(1, errno, "\rerror opening %s", file);
 	if (is_mounted(file, h)) error(1, errno, "\rdevice %s is mounted", file);
+	cct_backup_placement();
 	check_valid();
 	fprintf(stderr, "\rclearing previous state...\n");
 	clear_device();

@@ -90,6 +90,17 @@ If size is not specified, mkspadfs detects it. Size can have suffix 'K', 'M',
 --trim
 	Discard the content of the block device
 
+--cct-backup-far
+--cct-backup-near
+	Where to put the backup of the crash count table: at the end of the
+	volume, or next to the table itself. The far copy survives damage to
+	the start of the disk, but the backup is written after every commit,
+	and on a rotating disk the far position adds a seek to the end of the
+	volume and back to each one (+55 ms per commit measured on a laptop
+	SATA disk). The default is far on non-rotating devices and image
+	files, near on rotating disks. The txblock backup always goes at the
+	end; it is written rarely.
+
 --block-size <number>
 	Block size, minimum is 512B, maximum is 64KiB. The real maximum that can
 	be accessed by the kernel is page size of a machine.

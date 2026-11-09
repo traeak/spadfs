@@ -241,13 +241,21 @@ struct superblock {
 	 * is its side CRC region, laid out exactly like cct_crc. Both are kept
 	 * current by the commit path (Task 3.3) so that a restore can never be
 	 * stale -- see the plan's note on silent data reversion.
+	 *
+	 * mkspadfs places txblock_backup at the END of the volume, just below
+	 * the superblock's own backup at sector `size`, so damage to the start
+	 * of the disk cannot take out the primary and its copy together. The
+	 * cct backup goes there too on non-rotating devices, and next to the
+	 * primary on rotating disks, where a far write after every commit costs
+	 * a seek to the end and back (--cct-backup-far/-near override). Readers
+	 * only follow these pointers; nothing depends on where the regions are.
 	 */
 	__u64 cct_backup;
 	__u64 cct_backup_crc;
 
 	/*
-	 * Second copy of the txblock, one block of its own after the cct
-	 * backup's CRC region. The kernel writes it at every txblock write;
+	 * Second copy of the txblock, one block of its own at the end of the
+	 * volume (see above). The kernel writes it at every txblock write;
 	 * only spadfsck reads it, to restore a damaged primary. Its magic is
 	 * stamped with its own sector (dynamic magic), so it is not a
 	 * byte-for-byte copy.

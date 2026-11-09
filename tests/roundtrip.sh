@@ -21,7 +21,10 @@ SIZE="${TEST_IMAGE_SIZE:-64M}"
 
 # name | mkspadfs options | key=value assertions on sbinfo output
 PROFILES=(
-	"default||sectors_per_block_bits=3;flags_compat_none=0x00000007;flags_compat_ro=0x00000001;flags_compat_fsck=0x00000000;byte_sex=little"
+	"default||sectors_per_block_bits=3;flags_compat_none=0x00000007;flags_compat_ro=0x00000001;flags_compat_fsck=0x00000000;byte_sex=little;cct_backup_at_end=1"
+	"cctnear|--cct-backup-near|cct_backup_at_end=0"
+	"cctfar|--cct-backup-far|cct_backup_at_end=1"
+	"cctnear-512|--cct-backup-near --block-size 512|cct_backup_at_end=0;sectors_per_block_bits=0"
 	"block512|--block-size 512|sectors_per_block_bits=0"
 	"block4096|--block-size 4096|sectors_per_block_bits=3"
 	"unixnames|--unix-names|flags_compat_none=0x00000007"

@@ -142,8 +142,16 @@ def restripe_cct_side(f, info, cct_sector):
     CRC unit -- otherwise the unit trailer goes stale and fsck fails the unit
     rather than the sector, which would be detected for the wrong reason.
     """
-    u = cct_sector // CCT_CRC_PER_UNIT
-    slot = cct_sector % CCT_CRC_PER_UNIT
+    # cct_sector is absolute; the CRC unit and slot are indexed by the
+    # sector's position WITHIN the cct. Using the absolute number here once
+    # sent the restripe to unit 130 of a 5-unit region -- into whatever lay
+    # after it (the cct backup, in the old layout) -- so the cct rows of the
+    # attribution baseline measured that damage, not the checksum.
+    rel = cct_sector - info["cct"]
+    if not 0 <= rel < CCT_SECTORS:
+        raise ValueError(f"sector {cct_sector} is not in the cct")
+    u = rel // CCT_CRC_PER_UNIT
+    slot = rel % CCT_CRC_PER_UNIT
     crc_abs = info["cct_crc"] + u
     f.seek(crc_abs * SECTOR)
     unit = bytearray(f.read(SECTOR))

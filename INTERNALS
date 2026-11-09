@@ -163,7 +163,10 @@ block is that if txblock would be damaged during write, filesystem could still
 be recovered using the superblock.
 
 spadfs2: the txblock has a second copy, pointed to by the superblock's
-txblock_backup field and placed after the crash count table's backup. The
+txblock_backup field and placed at the end of the volume, so that damage to
+the start of the disk cannot take out both copies. (mkspadfs puts the crash
+count table's backup there as well on non-rotating devices; on rotating disks
+it stays next to the table, because it is written after every commit.) The
 kernel rewrites it at every txblock write, under the same flush. Only spadfsck
 reads it: when the primary is damaged, spadfsck restores it from the copy
 instead of rebuilding the txblock from scratch.

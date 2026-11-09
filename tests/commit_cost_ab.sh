@@ -18,10 +18,21 @@
 # mount), exactly as the other root tests do, and is left mounted with B.
 #
 # Usage:
-#   sudo bash tests/commit_cost_ab.sh [-d DEV] [-m MNT] [-n ITERS] [-r ROUNDS] KO_A KO_B
+#   sudo bash tests/commit_cost_ab.sh [-d DEV] [-m MNT] [-n ITERS] [-r ROUNDS]
+#        [--mkfs-a MKFS --mkfs-b MKFS] KO_A KO_B
+#
+# --mkfs-a/--mkfs-b compare two on-disk LAYOUTS rather than (or as well as)
+# two modules: before each round DEV is reformatted with that side's
+# mkspadfs2. THIS ERASES DEV every round -- use a scratch partition only.
+# Give the same module twice to compare layouts alone.
 #
 # DEV must currently be a mounted spadfs2 volume at MNT (defaults as in
 # commit_cost.sh). Writes $MNT/commitcost.* and removes them.
+#
+# Example -- old layout vs new (backups at the end), same module:
+#   git worktree add /tmp/spadfs-head HEAD && make -C /tmp/spadfs-head mkspadfs2
+#   sudo bash tests/commit_cost_ab.sh --mkfs-a /tmp/spadfs-head/mkspadfs2 \
+#        --mkfs-b ./mkspadfs2 ./spadfs2.ko ./spadfs2.ko
 #
 # Example -- before vs after dropping the mirror flush:
 #   git worktree add /tmp/spadfs-3flush HEAD
@@ -35,6 +46,8 @@ DEV=${DEV:-/dev/sda1}
 MNT=${MNT:-/mnt/spadcrash}
 ITERS=${ITERS:-100}
 ROUNDS=${ROUNDS:-5}
+MKFS_A=""
+MKFS_B=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -42,6 +55,8 @@ while [ $# -gt 0 ]; do
 	-m) MNT=$2; shift 2 ;;
 	-n) ITERS=$2; shift 2 ;;
 	-r) ROUNDS=$2; shift 2 ;;
+	--mkfs-a) MKFS_A=$(readlink -f "$2"); shift 2 ;;
+	--mkfs-b) MKFS_B=$(readlink -f "$2"); shift 2 ;;
 	-*) echo "unknown option: $1" >&2; exit 2 ;;
 	*) break ;;
 	esac
@@ -54,6 +69,10 @@ KO_B=$(readlink -f "$2")
 for ko in "$KO_A" "$KO_B"; do
 	[ -r "$ko" ] || { echo "commit_cost_ab: no module at $ko" >&2; exit 1; }
 done
+if [ -n "$MKFS_A$MKFS_B" ]; then
+	{ [ -x "$MKFS_A" ] && [ -x "$MKFS_B" ]; } ||
+		{ echo "commit_cost_ab: --mkfs-a and --mkfs-b must both name an mkspadfs2" >&2; exit 2; }
+fi
 fstype=$(findmnt -n -o FSTYPE -S "$DEV" 2>/dev/null | head -1)
 target=$(findmnt -n -o TARGET -S "$DEV" 2>/dev/null | head -1)
 if [ "$fstype" != spadfs2 ] || [ "$target" != "$MNT" ]; then
@@ -65,8 +84,13 @@ OPTS=$(findmnt -n -o OPTIONS -S "$DEV" | head -1)
 stat_file=/sys/class/block/$(basename "$(readlink -f "$DEV")")/stat
 sectors_written() { awk '{print $7}' "$stat_file"; }
 
+# use_module KO [MKFS]: switch to KO; with MKFS, reformat DEV first
 use_module() {
 	umount "$MNT" || { echo "commit_cost_ab: cannot unmount $MNT" >&2; exit 1; }
+	if [ -n "${2:-}" ]; then
+		"$2" --no-trim "$DEV" >/dev/null 2>&1 ||
+			{ echo "commit_cost_ab: $2 failed on $DEV" >&2; exit 1; }
+	fi
 	if [ -e /sys/module/spadfs2 ]; then
 		rmmod spadfs2 || { echo "commit_cost_ab: cannot unload spadfs2" >&2; exit 1; }
 	fi
@@ -98,13 +122,13 @@ RES=$(mktemp)
 trap 'rm -f "$RES"' EXIT
 
 printf 'device %s, %d commits per round, %d rounds per module, alternating\n' "$DEV" "$ITERS" "$ROUNDS"
-printf 'A = %s\nB = %s\n\n' "$KO_A" "$KO_B"
+printf 'A = %s %s\nB = %s %s\n\n' "$KO_A" "${MKFS_A:+(mkfs $MKFS_A)}" "$KO_B" "${MKFS_B:+(mkfs $MKFS_B)}"
 printf '%-6s %-3s %10s %12s\n' round mod 'ms/commit' 'KiB/commit'
 for r in $(seq 1 "$ROUNDS"); do
 	for m in A B; do
-		ko=$KO_A
-		[ "$m" = B ] && ko=$KO_B
-		use_module "$ko"
+		ko=$KO_A mk=$MKFS_A
+		[ "$m" = B ] && ko=$KO_B mk=$MKFS_B
+		use_module "$ko" "$mk"
 		read -r ms kib < <(measure)
 		printf '%-6s %-3s %10s %12s\n' "$r" "$m" "$ms" "$kib"
 		printf '%s %s %s\n' "$m" "$ms" "$kib" >>"$RES"

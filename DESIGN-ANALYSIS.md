@@ -29,17 +29,16 @@ spadfsck) and proven by a real mount; `tests/HARDWARE-NOTES.md` has the runs.
 | 8-bit XOR checksums | **CRC-32C** on the superblock, txblock, userblock, anode and fixed fnode block (512-byte trailer), the fnode block (in a header grown from 24 to 32 bytes, because its fnode chain must tile to byte 512), each dnode version (stored in the unused tail of the dnode page), each apage half (in its last 16-byte entry slot, given up for it), the crash-count table (a side CRC region) and each apage index copy (a CRC per copy, kept in the txblock). No structure uses the 8-bit XOR fold any more, and no metadata is left without a checksum. |
 | Checksum checks gated by a bit in the block, `--no-checksums` | Checksums are always on. Every reader verifies every block whatever its `*_CHECKSUM_VALID` bit says; the option, the mount options and the superblock flag are gone. |
 | Kernel never verified apage or dnode checksums | The kernel seals both on every write and verifies the active half/version when it is read. |
-| `cct[]` single point of failure | A full mirror with its own CRC region and an epoch stamp, kept current by every commit; spadfsck restores from it. |
-| txblock single point of failure (not in the original list) | A second copy, written at every txblock write; spadfsck restores from it. |
+| `cct[]` single point of failure | A full mirror with its own CRC region and an epoch stamp, kept current by every commit; spadfsck restores from it. mkspadfs puts it at the end of the volume on non-rotating devices and next to the primary on rotating disks, where the far position cost +55 ms per commit (34 -> 89 ms on a laptop SATA disk). |
+| txblock single point of failure (not in the original list) | A second copy, written at every txblock write, at the end of the volume; spadfsck restores from it. |
 | Commit ordering (not in the original list) | v1.0.22 wrote the cct with no cache flush before it, so after a power cut the commit could be durable while its metadata was not. A flush now precedes the cct write. Proven with dm-log-writes crash-state replay (`tests/crash_logwrites.sh`). |
 | Commit cost | Two cache flushes per commit (before and after the cct). Measured 44.7 ms per `syncfs` commit on a laptop SATA disk, where one flush costs about 11–12 ms (`tests/commit_cost_ab.sh`). |
 | 2^16 crash-count ceiling | Kept: `cc` indexes the cct, so widening it means a 16 GiB table or a redesign. The kernel warns from 0xff00; `spadfsck --reset-crash-counts` recovers. |
 | Symlink limit | 164 characters (was 172): the larger fnode block header took 8 bytes from the EA pool. |
 | Kernel support | Floor raised to 6.1 LTS; `linux-compat.h` is 171 lines. |
 
-Still open: all redundant copies sit near the start of the volume except the
-superblock's;
-the hash benchmark (Phase 5); sparse files and the symlink limit (Phase 6).
+Still open: the hash benchmark (Phase 5); sparse files and the symlink limit
+(Phase 6).
 
 ---
 
@@ -436,9 +435,15 @@ pure out-of-tree tax. Upstreaming would delete most of it.
    inventing new machinery, it is applying a precedent the format already uses.
 
    *spadfs2: done.* The cct has a mirror with its own CRC region and an epoch
-   stamp, and the txblock has a second copy. Both sit near the primary, so a
-   bad sector or torn write is covered but damage to the start of the volume
-   is not; only the superblock has a copy at the far end.
+   stamp, and the txblock has a second copy. The txblock backup sits at the
+   end of the volume beside the superblock's backup, so damage to the start
+   of the disk cannot take out both copies. The cct backup does too on
+   non-rotating devices; on rotating disks mkspadfs keeps it next to the
+   primary, because a far write after every commit cost +55 ms per commit
+   on a laptop SATA disk, so there damage to the start can still take out
+   both cct copies. (The apages, the
+   apage index and the root directory have one copy each, near the start;
+   spadfsck rebuilds the first two from the directory tree.)
 3. **File size in the directory block** → append dirties the parent dir; contention
    on hot directories. Prealloc mitigates, does not solve.
 4. **Hash quality unverified.** `*15` plus low-bits-first is a known-weak
