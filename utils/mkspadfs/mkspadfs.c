@@ -74,7 +74,8 @@ error(int x, int y, char *m, ...)
 	cct_sector+CCT_SECTORS -- cct_crc_sector, CCT_CRC_UNITS of side CRCs
 	cct_crc_sector+cct_crc_sectors -- cct_backup_sector, CCT_SECTORS (Phase 3)
 	cct_backup_sector+CCT_SECTORS -- cct_backup_crc_sector, same CRC geometry
-	cct_backup_crc_sector+cct_crc_sectors -- root fnode
+	cct_backup_crc_sector+cct_crc_sectors -- txblock_backup_sector, one block
+	txblock_backup_sector+block_sectors -- root fnode
 	64 (ROOT_DIR) -- root directory
 	-- free space
 	superblock backup
@@ -164,6 +165,7 @@ static __u64 cct_crc_sector;
 static __u64 cct_crc_sectors;	/* CCT_CRC_UNITS rounded up to whole blocks */
 static __u64 cct_backup_sector;	/* Phase 3: mirror of the crash-count table */
 static __u64 cct_backup_crc_sector;
+static __u64 txblock_backup_sector;	/* second copy of the txblock */
 static __u64 root_fnode_sector;
 static __u64 root_dir_sector;
 
@@ -364,7 +366,9 @@ static void check_valid(void)
 	 */
 	cct_backup_sector = block_align(cct_crc_sector + cct_crc_sectors);
 	cct_backup_crc_sector = block_align(cct_backup_sector + CCT_BACKUP_SECTORS);
-	root_fnode_sector = cct_backup_crc_sector + cct_crc_sectors;
+	/* the txblock's backup: a whole block, so the next boundary stays aligned */
+	txblock_backup_sector = cct_backup_crc_sector + cct_crc_sectors;
+	root_fnode_sector = txblock_backup_sector + block_sectors;
 	root_dir_sector = fnode_align(root_fnode_sector + block_sectors, ROOT_DIR_SECTORS);
 }
 
@@ -519,6 +523,7 @@ static void write_super(void)
 	CPU2SPAD64_LV(&sb->cct_crc, cct_crc_sector);
 	CPU2SPAD64_LV(&sb->cct_backup, cct_backup_sector);
 	CPU2SPAD64_LV(&sb->cct_backup_crc, cct_backup_crc_sector);
+	CPU2SPAD64_LV(&sb->txblock_backup, txblock_backup_sector);
 	CPU2SPAD64_LV(&sb->root, root_fnode_sector);
 	if (unix_names)
 		CPU2SPAD32_LV(&sb->flags_compat_none, SPAD2CPU32_LV(&sb->flags_compat_none) | FLAG_COMPAT_NONE_UNIX_NAMES);
@@ -553,6 +558,10 @@ static void write_txbl(void)
 				 * covers it, and the txblock trailer is authoritative */
 	spadfs_meta_seal(txb);
 	write_blocks(sb, txblock_sector, block_sectors);
+	/* the backup: same contents, its own sector in the magic */
+	CPU2SPAD32_LV(&txb->magic, magic(txblock_backup_sector, TXBLOCK_MAGIC));
+	spadfs_meta_seal(txb);
+	write_blocks(sb, txblock_backup_sector, block_sectors);
 }
 
 static void write_txct(__u64 base)

@@ -498,6 +498,51 @@ void spadfs_tx_block_checksum(struct txblock *tb)
 	spadfs_meta_seal(tb);
 }
 
+/*
+ * Copy a just-sealed txblock into its backup (struct superblock,
+ * txblock_backup). Every txblock write calls this under the same lock, so
+ * the backup carries each state the primary does and reaches disk under the
+ * same flush: with sync, it is written before the caller's flush; without,
+ * the commit's sync_blockdev and flush take both.
+ *
+ * Only spadfsck reads the backup, to restore a damaged primary; the kernel
+ * never mounts from it. A backup one write behind may carry an older stable
+ * inode counter, and spadfsck raises that to the highest inode it finds
+ * before the volume is used again.
+ *
+ * A failure is recorded as a write error but does not fail the caller: the
+ * primary is what the volume runs on.
+ */
+int spadfs_write_tx_block_backup(SPADFS *fs, struct txblock *tb, int sync)
+{
+	struct buffer_head *bh;
+	struct txblock *b;
+	int r = 0;
+
+	b = spadfs_get_new_sector(fs, fs->txb_backup_sec, &bh,
+				  "spadfs_write_tx_block_backup");
+	if (unlikely(IS_ERR(b))) {
+		r = PTR_ERR(b);
+		goto err;
+	}
+	start_atomic_buffer_modify(fs, bh);
+	spadfs_memcpy(b, tb, 512);
+	CPU2SPAD32_LV(&b->magic,
+		      spadfs_magic(fs, fs->txb_backup_sec, TXBLOCK_MAGIC));
+	spadfs_tx_block_checksum(b);
+	end_atomic_buffer_modify(fs, bh);
+	if (sync)
+		r = spadfs_sync_dirty_buffer(bh);
+	spadfs_brelse(fs, bh);
+	if (likely(!r))
+		return 0;
+err:
+	spadfs_error(fs, TXFLAGS_IO_WRITE_ERROR,
+		"write error at tx block backup %Lx: %d",
+		(unsigned long long)fs->txb_backup_sec, r);
+	return r;
+}
+
 static int spadfs_increase_cc(SPADFS *fs, int inc)
 {
 	struct txblock *tb;
@@ -557,6 +602,9 @@ skip_inc:
 	end_atomic_buffer_modify(fs, bh);
 
 	r = spadfs_sync_dirty_buffer(bh);
+	/* the backup goes out under the same flush; its failure is logged only */
+	if (likely(!r))
+		spadfs_write_tx_block_backup(fs, tb, 1);
 	if (likely(!r))
 		r = spadfs_issue_flush(fs);
 	if (unlikely(r))
@@ -626,6 +674,7 @@ static noinline int spadfs_new_stable_ino_slow(SPADFS *fs, u64 *stable_ino)
 	spadfs_tx_block_checksum(tb);
 
 	end_atomic_buffer_modify(fs, bh);
+	spadfs_write_tx_block_backup(fs, tb, 0);
 	spadfs_brelse(fs, bh);
 
 	r = 0;
@@ -1676,6 +1725,7 @@ read_again:
 		fs->n_apage_mappings = 1;
 
 	fs->txb_sec = SPAD2CPU64_LV(&sb->txblock);
+	fs->txb_backup_sec = SPAD2CPU64_LV(&sb->txblock_backup);
 	fs->apage_index0_sec = SPAD2CPU64_LV(&sb->apage_index[0]);
 	fs->apage_index1_sec = SPAD2CPU64_LV(&sb->apage_index[1]);
 	fs->cct_sec = SPAD2CPU64_LV(&sb->cct);

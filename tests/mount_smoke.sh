@@ -237,6 +237,49 @@ fi
 
 losetup -d "$LOOP" 2>/dev/null; LOOP=""
 
+# ---------------------------------------------------------------------------
+banner "7. txblock backup -- kept in step, and a damaged primary recovers"
+# ---------------------------------------------------------------------------
+# The kernel rewrites the txblock's backup at every txblock write; after the
+# clean unmount above both copies must verify and carry the same state.
+# Then damage the primary: the kernel must refuse the volume (it never mounts
+# from the backup), spadfsck -y must restore the primary from the backup,
+# and the volume must mount again with its data. (tests/txb_backup.sh covers
+# the fsck side in more detail without root.)
+TXI=$(python3 "$TESTS_DIR/txbinfo.py" "$IMG")
+echo "    $TXI"
+case "$TXI" in
+	"pri=ok bak=ok same=1 "*) ok "after real mounts both txblock copies verify and match" ;;
+	*) bad "txblock copies not in step after real mounts" "$TXI" ;;
+esac
+TXB=$(python3 "$TESTS_DIR/sbinfo.py" "$IMG" | sed -n 's/^txblock=//p')
+printf '\x20' | dd of="$IMG" bs=1 seek=$((TXB * 512 + 40)) conv=notrunc status=none
+LOOP=$(losetup --find --show "$IMG") || die "losetup failed"
+if mount -t spadfs2 "$LOOP" "$MNT" 2>/dev/null; then
+	bad "mounted with a damaged txblock (the kernel must not)"
+	umount "$MNT"
+else
+	ok "the kernel refuses a volume whose txblock is damaged"
+fi
+losetup -d "$LOOP"; LOOP=""
+"$FSCK" -y -f "$IMG" >"$WORKDIR/fsck-txb.txt" 2>&1
+grep -q "TX BLOCK BACKUP .* IS INTACT" "$WORKDIR/fsck-txb.txt" \
+	&& ok "spadfsck finds the intact backup" \
+	|| bad "spadfsck did not use the backup" "$(tail -5 "$WORKDIR/fsck-txb.txt")"
+LOOP=$(losetup --find --show "$IMG") || die "losetup failed"
+if mount -t spadfs2 "$LOOP" "$MNT" 2>/dev/null; then
+	[ "$(cat "$MNT/file1.txt" 2>/dev/null)" = "spadfs2 test payload 1" ] \
+		&& ok "after the restore the volume mounts and its data is intact" \
+		|| bad "mounted after the restore, but data is wrong"
+	umount "$MNT"
+else
+	bad "volume does not mount after spadfsck restored the txblock" "$(dmesg | tail -3)"
+fi
+losetup -d "$LOOP"; LOOP=""
+"$FSCK" -n -f "$IMG" >/dev/null 2>&1 \
+	&& ok "clean after the restore and a mount" \
+	|| bad "not clean after the restore and a mount"
+
 printf '\n'
 summary || true
 printf '\nIf anything above failed, capture:  dmesg | tail -50\n'

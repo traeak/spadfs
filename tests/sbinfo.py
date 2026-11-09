@@ -41,6 +41,8 @@ FIELDS = [
     # every offset above is unchanged. Verified by offsetof probe, not by hand.
     ("cct_backup",            112, "Q"),
     ("cct_backup_crc",        120, "Q"),
+    # second copy of the txblock (one block of its own)
+    ("txblock_backup",        128, "Q"),
 ]
 
 # struct superblock is little-endian on disk only if byte_sex reads ascending.

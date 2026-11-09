@@ -390,6 +390,7 @@ struct __spadfs {
 
 /* Values read from superblock */
 	sector_t txb_sec;
+	sector_t txb_backup_sec;
 	sector_t apage_index0_sec;
 	sector_t apage_index1_sec;
 	sector_t cct_sec;
@@ -971,6 +972,7 @@ __cold void __attribute__ ((__format__ (__printf__, 3, 4))) spadfs_error_(SPADFS
 int spadfs_stop_cycles(SPADFS *fs, sector_t key, sector_t (*c)[2], const char *msg);
 int spadfs_issue_flush(SPADFS *fs);
 void spadfs_tx_block_checksum(struct txblock *tb);
+int spadfs_write_tx_block_backup(SPADFS *fs, struct txblock *tb, int sync);
 int spadfs_new_stable_ino(SPADFS *fs, u64 *stable_ino);
 int spadfs_commit_unlocked(SPADFS *fs);
 int spadfs_commit(SPADFS *fs);

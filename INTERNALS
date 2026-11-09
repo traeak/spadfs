@@ -162,6 +162,12 @@ apage_index is valid. The reason for moving volatile information to another
 block is that if txblock would be damaged during write, filesystem could still
 be recovered using the superblock.
 
+spadfs2: the txblock has a second copy, pointed to by the superblock's
+txblock_backup field and placed after the crash count table's backup. The
+kernel rewrites it at every txblock write, under the same flush. Only spadfsck
+reads it: when the primary is damaged, spadfsck restores it from the copy
+instead of rebuilding the txblock from scratch.
+
 All pointers to other blocks are in sectors (512-byte size) even if the
 filesystem has larger block size. If the block size is larger than 512, pointers
 on disk have to be divisible by (block_size/512).

@@ -2323,6 +2323,7 @@ __cold static int write_apage_index(SPADFS *fs)
 		tx->a_txc = fs->a_txc;
 		spadfs_tx_block_checksum(tx);
 		end_atomic_buffer_modify(fs, bh);
+		spadfs_write_tx_block_backup(fs, tx, 0);
 		spadfs_brelse(fs, bh);
 	}
 	n = APAGE_INDEX_SECTORS(fs->n_apages, 512U << fs->sectors_per_disk_block_bits);

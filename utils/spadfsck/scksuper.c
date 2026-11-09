@@ -46,15 +46,23 @@ void write_super(void)
 	}
 }
 
+/* seal tx with the magic of the sector it is going to, and write it there */
+static void write_txblock_at(blk_t sec)
+{
+	CPU2SPAD32_LV(&tx.magic, magic(sec, TXBLOCK_MAGIC));
+	tx.checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
+				 * zeroed to a deterministic value so the trailer
+				 * covers it; the txblock trailer is authoritative */
+	spadfs_meta_seal(&tx);
+	write_buffer(sec, 1, &tx);
+}
+
+/* both copies: the primary, then its backup (struct superblock) */
 void write_txblock(void)
 {
 	if (tx_valid) {
-		CPU2SPAD32_LV(&tx.magic, magic(SPAD2CPU64_LV(&super.txblock), TXBLOCK_MAGIC));
-		tx.checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
-					 * zeroed to a deterministic value so the trailer
-					 * covers it; the txblock trailer is authoritative */
-		spadfs_meta_seal(&tx);
-		write_buffer(SPAD2CPU64_LV(&super.txblock), 1, &tx);
+		write_txblock_at(SPAD2CPU64_LV(&super.txblock_backup));
+		write_txblock_at(SPAD2CPU64_LV(&super.txblock));
 	}
 }
 
@@ -111,6 +119,9 @@ static int alloc_super(void)
 		if (__unlikely(r = alloc_blocks(SUPERBLOCK_SECTOR, 1 << super.sectors_per_block_bits)))
 			return r;
 	}
+	/* the txblock backup belongs to the volume even when it is damaged */
+	if (__unlikely(r = alloc_blocks(SPAD2CPU64_LV(&super.txblock_backup), 1 << super.sectors_per_block_bits)))
+		return r;
 	return 0;
 }
 
@@ -352,33 +363,80 @@ static int check_sb2(void)
 	return 0;
 }
 
+/*
+ * Read one copy of the txblock into buf. Returns NULL when it is good, else
+ * a description of what is wrong with it, in why (the caller logs it).
+ */
+#define TXB_WHY_LEN	320
+static const char *read_txblock_copy(blk_t sec, struct txblock *buf, char *why)
+{
+	struct txblock *t;
+	if (__unlikely(!(t = read_buffer(sec, 1, 0)))) {
+		snprintf(why, TXB_WHY_LEN, "UNABLE TO READ: %s", buffer_error);
+		return why;
+	}
+	if (__unlikely(SPAD2CPU32_LV(&t->magic) != magic(sec, TXBLOCK_MAGIC)))
+		return "BAD MAGIC";
+	if (__unlikely(spadfs_meta_verify(t))) {
+		snprintf(why, TXB_WHY_LEN, "BAD CHECKSUM: stored %08X computed %08X",
+			 spadfs_meta_stored_crc(t), spadfs_meta_computed_crc(t));
+		return why;
+	}
+	memcpy(buf, t, 512);
+	return NULL;
+}
+
+/*
+ * The txblock has a backup copy (struct superblock, txblock_backup), which
+ * the kernel writes at every txblock write. A damaged primary is restored
+ * from it; without it, fsck had to start from an empty txblock, treat the
+ * crash-count table as invalid and rebuild the apage index from a scan.
+ *
+ * The backup may legitimately be one write behind (a crash between the two
+ * writes), so a valid backup that differs from a valid primary is not an
+ * error. Its stable inode counter may then be low; fix_txblock raises it to
+ * the highest inode number found.
+ */
 static int check_txb(void)
 {
 	int r;
-	struct txblock *t;
-	if (__unlikely(!(t = read_buffer(SPAD2CPU64_LV(&super.txblock), 1, 0)))) {
-		log_printf(0, "UNABLE TO READ TX BLOCK %"blk_format"X: %s", SPAD2CPU64_LV(&super.txblock), buffer_error);
-		tx_error:
-		force = 1;
-		fill_empty_txblock();
-		goto return_ok;
+	blk_t pri = SPAD2CPU64_LV(&super.txblock);
+	blk_t bak = SPAD2CPU64_LV(&super.txblock_backup);
+	/* whole sectors: struct txblock is only the 32-byte header */
+	static __u64 pbuf[512 / 8], bbuf[512 / 8];
+	static char pwhy_buf[TXB_WHY_LEN], bwhy_buf[TXB_WHY_LEN];
+	struct txblock *t = (struct txblock *)pbuf;
+	const char *pwhy, *bwhy;
+	pwhy = read_txblock_copy(pri, (struct txblock *)pbuf, pwhy_buf);
+	bwhy = read_txblock_copy(bak, (struct txblock *)bbuf, bwhy_buf);
+	if (__unlikely(pwhy != NULL)) {
+		log_printf(0, "TX BLOCK %"blk_format"X: %s", pri, pwhy);
+		if (bwhy) {
+			log_printf(0, "TX BLOCK BACKUP %"blk_format"X: %s", bak, bwhy);
+			tx_error:
+			force = 1;
+			fill_empty_txblock();
+			goto return_ok;
+		}
+		log_printf(0, "TX BLOCK BACKUP %"blk_format"X IS INTACT", bak);
+		t = (struct txblock *)bbuf;
+	} else if (__unlikely(bwhy != NULL)) {
+		log_printf(0, "TX BLOCK BACKUP %"blk_format"X: %s", bak, bwhy);
 	}
-	if (__unlikely(SPAD2CPU32_LV(&t->magic) != magic(SPAD2CPU64_LV(&super.txblock), TXBLOCK_MAGIC))) {
-		log_printf(0, "BAD MAGIC ON TX BLOCK %"blk_format"X", SPAD2CPU64_LV(&super.txblock));
-		goto tx_error;
-	}
-	if (__unlikely(spadfs_meta_verify(t))) {
-		log_printf(0, "BAD CHECKSUM ON TX BLOCK %"blk_format"X: stored %08X computed %08X",
-			   SPAD2CPU64_LV(&super.txblock), spadfs_meta_stored_crc(t),
-			   spadfs_meta_computed_crc(t));
-		goto tx_error;
-	}
-	if (__unlikely(r = alloc_blocks(SPAD2CPU64_LV(&super.txblock), (1 << super.sectors_per_block_bits)))) {
+	if (__unlikely(r = alloc_blocks(pri, (1 << super.sectors_per_block_bits)))) {
 		if (r == 2) return 2;
 		log_printf(0, "TX BLOCK ALLOCATION ERROR: %s", alloc_error);
 		goto tx_error;
 	}
 	memcpy(&tx, t, 512);
+	if (__unlikely(pwhy != NULL)) {
+		/* restore the primary, and use the backup's contents either way */
+		tx_valid = 1;
+		if (query(qprefix 0, "RESTORE TX BLOCK FROM ITS BACKUP?")) write_txblock();
+	} else if (__unlikely(bwhy != NULL)) {
+		tx_valid = 1;
+		if (query(qprefix 0, "REWRITE TX BLOCK BACKUP?")) write_txblock();
+	}
 	if (SPAD2CPU32_LV(&tx.txflags) & TXFLAGS_DIRTY) log_printf(0, "FILESYSTEM HAS DIRTY FLAG");
 	if (SPAD2CPU32_LV(&tx.txflags) & TXFLAGS_IO_READ_ERROR) log_printf(0, "FILESYSTEM HAS I/O READ ERROR FLAG");
 	if (SPAD2CPU32_LV(&tx.txflags) & TXFLAGS_IO_WRITE_ERROR) log_printf(0, "FILESYSTEM HAS I/O WRITE ERROR FLAG");

@@ -244,6 +244,15 @@ struct superblock {
 	 */
 	__u64 cct_backup;
 	__u64 cct_backup_crc;
+
+	/*
+	 * Second copy of the txblock, one block of its own after the cct
+	 * backup's CRC region. The kernel writes it at every txblock write;
+	 * only spadfsck reads it, to restore a damaged primary. Its magic is
+	 * stamped with its own sector (dynamic magic), so it is not a
+	 * byte-for-byte copy.
+	 */
+	__u64 txblock_backup;
 };
 
 /*
@@ -1118,6 +1127,9 @@ static __finline__ const char *validate_super(struct superblock *super)
 	if (unlikely(SPAD2CPU64_LV(&super->cct_backup_crc) &&
 		     !validate_range(SPAD2CPU64_LV(&super->size), blockmask, SPAD2CPU64_LV(&super->cct_backup_crc), (CCT_BACKUP_CRC_UNITS + blockmask) & ~(__u64)blockmask)))
 		return "cct_backup_crc invalid";
+	if (unlikely(!validate_range(SPAD2CPU64_LV(&super->size), blockmask, SPAD2CPU64_LV(&super->txblock_backup), blockmask + 1)) ||
+	    unlikely(SPAD2CPU64_LV(&super->txblock_backup) == SPAD2CPU64_LV(&super->txblock)))
+		return "txblock_backup invalid";
 	return (char *)0;
 }
 

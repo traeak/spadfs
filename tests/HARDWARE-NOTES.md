@@ -160,3 +160,19 @@ fnode slot at the old offset (280, not 264). The saved images passed a clean
 rebuild of spadfsck unchanged. The unprivileged suite missed it because it
 never makes a hard link, so it never creates a fixed fnode block. The
 Makefile now generates dependencies (`-MMD -MP`).
+
+## 2026-11-09: txblock backup copy (#2 of the design review)
+
+The superblock's new `txblock_backup` field points at a second txblock,
+after the cct backup's CRC region. mkfs writes both copies, the kernel
+rewrites the backup at every txblock write (mount/unmount/error flags under
+the same flush, the stable-inode batch and the apage-index switch with the
+commit), and only spadfsck reads it: a damaged primary is restored from it
+instead of being replaced by an empty txblock. Root runs by the operator on
+7.3.0_1, all pass:
+
+| Test | What it now covers |
+|---|---|
+| `tests/mount_smoke.sh` | new section 7: after real mounts both copies verify and match; with the primary damaged the kernel refuses the volume; `spadfsck -y` restores it from the backup; the volume mounts again with its data and checks clean |
+| `tests/crash_logwrites.sh` | every replayed crash state, with the backup written alongside the primary |
+| `tests/meta_csum_mount.sh` | unchanged checks on the new layout |

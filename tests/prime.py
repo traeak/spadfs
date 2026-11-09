@@ -204,6 +204,18 @@ def prime(path, new_cc, base_txc, dry_run=False):
         f.seek(tx_off)
         f.write(tx)
 
+        # Keep the txblock's backup in step, as the kernel does at every
+        # txblock write: same contents, its own sector in the (dynamic)
+        # magic. Otherwise a fixture that is later restored from the backup
+        # would come back unprimed.
+        bak = info["txblock_backup"]
+        magic = rd32(tx, 0) ^ info["txblock"] ^ bak \
+            if info["flags_compat_none"] & 0x2 else rd32(tx, 0)
+        wr32(tx, 0, magic)
+        seal_unit(tx, TX_CHECKSUM)
+        f.seek(bak * SECTOR)
+        f.write(tx)
+
         # Write plausible transaction counts into cct[0..new_cc].
         # Values must have the top bit clear; increasing counts read as a
         # volume that committed work across several crash cycles.
