@@ -91,6 +91,16 @@ int check_apages(void)
 		memcpy((char *)apage_index + ((unsigned long)j << SSIZE_BITS), a, 1 << SSIZE_BITS);
 	}
 
+	/* CRC-32C of the live copy's entries, kept in the txblock (struct.h) */
+	{
+		__u32 stored = SPAD2CPU32_LV(&tx.apage_index_crc[c_index]);
+		__u32 computed = spadfs_crc32c_std(apage_index, (size_t)n_apages * sizeof(struct apage_index_entry));
+		if (__unlikely(stored != computed)) {
+			log_printf(0, "BAD CHECKSUM ON APAGE INDEX %u: stored %08X computed %08X", c_index, stored, computed);
+			goto apage_index_invalid;
+		}
+	}
+
 	for (j = 0; j < n_apages; j++) {
 		if (__unlikely(!ptr_valid(SPAD2CPU64_LV(&apage_index[j].apage), 1 << super.sectors_per_page_bits))) {
 			log_printf(0, "INVALID APAGE_INDEX [%u][%u] %"blk_format"X: %s", c_index, j, SPAD2CPU64_LV(&apage_index[j].apage), ptr_error);
@@ -804,6 +814,9 @@ int fix_apages(void)
 		i++;
 	}
 	write_buffer(SPAD2CPU64_LV(&super.apage_index[c_index]), apage_index_sectors, apage_index);
+	/* the rebuilt copy's CRC, into the txblock (written now if it is valid) */
+	CPU2SPAD32_LV(&tx.apage_index_crc[c_index], spadfs_crc32c_std(apage_index, (size_t)n_apages * sizeof(struct apage_index_entry)));
+	write_txblock();
 	return 0;
 }
 

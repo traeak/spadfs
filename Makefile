@@ -111,6 +111,7 @@ test : $(MKFS_TOOL) $(FSCK_TOOL) crc-agreement
 	bash tests/cc_wrap.sh
 	bash tests/txb_backup.sh
 	bash tests/fsck_fblk_magic.sh
+	bash tests/apage_index_crc.sh
 	python3 tests/logwrites_test.py
 	python3 tests/metasum_test.py
 	bash tests/restripe.sh > tests/BASELINE-restripe-attribution.md

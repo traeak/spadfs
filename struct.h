@@ -305,6 +305,19 @@ struct txblock {
 	__u32 txflags;
 	__u32 pad3;
 	__u64 ino;
+	/*
+	 * CRC-32C of each apage index copy: its first n_apages entries, as
+	 * held in memory (apage_index_crc[k] covers super.apage_index[k]).
+	 * The index has no room of its own -- each copy is rounded to whole
+	 * blocks, which 16-byte entries can fill exactly -- and the txblock
+	 * already says which copy is live.
+	 *
+	 * Crash safety: the driver writes an index copy only after switching
+	 * a_cc/a_txc to it in the current transaction, and updates only that
+	 * copy's CRC. Until the commit the other copy stays live, and its CRC
+	 * is untouched.
+	 */
+	__u32 apage_index_crc[2];
 };
 
 #define SPADFS_INO_INITIAL_REGION	0x40000000

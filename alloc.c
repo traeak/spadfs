@@ -2326,12 +2326,23 @@ ret0:
 	return r;
 }
 
-/* Write apage index after the split */
+/*
+ * Write apage index after the split.
+ *
+ * The copy written is always the one made current in this transaction, and
+ * its CRC goes into the txblock (apage_index_crc in struct.h). The CRC is
+ * over all n_apages in-memory entries even when only the active part is
+ * written: the mount's first index write goes to the copy that is not live
+ * and is a full write, and entries past n_active_apages never change in
+ * memory, so both copies on disk match memory beyond the part written.
+ */
 
 __cold static int write_apage_index(SPADFS *fs)
 {
-	unsigned i, n;
+	unsigned i, n, copy;
 	sector_t sec;
+	struct txblock *tx;
+	struct buffer_head *txbh;
 	if (likely(!CC_CURRENT(fs, &fs->a_cc, &fs->a_txc))) {
 		struct txblock *tx;
 		struct buffer_head *bh;
@@ -2348,7 +2359,8 @@ __cold static int write_apage_index(SPADFS *fs)
 		spadfs_brelse(fs, bh);
 	}
 	n = APAGE_INDEX_SECTORS(fs->n_apages, 512U << fs->sectors_per_disk_block_bits);
-	sec = CC_VALID(fs, &fs->a_cc, &fs->a_txc) ? fs->apage_index0_sec : fs->apage_index1_sec;
+	copy = !CC_VALID(fs, &fs->a_cc, &fs->a_txc);
+	sec = !copy ? fs->apage_index0_sec : fs->apage_index1_sec;
 	for (i = 0; i < n;
 	     i += 1U << fs->sectors_per_buffer_bits,
 	     sec += 1U << fs->sectors_per_buffer_bits) {
@@ -2365,6 +2377,18 @@ __cold static int write_apage_index(SPADFS *fs)
 		spadfs_brelse(fs, bh);
 	}
 	fs->split_happened = 1;
+
+	tx = spadfs_read_tx_block(fs, &txbh, "write_apage_index 3");
+	if (unlikely(IS_ERR(tx)))
+		return PTR_ERR(tx);
+	start_atomic_buffer_modify(fs, txbh);
+	CPU2SPAD32_LV(&tx->apage_index_crc[copy],
+		      spadfs_crc32c_std(fs->apage_index,
+				(size_t)fs->n_apages * sizeof(struct apage_index_entry)));
+	spadfs_tx_block_checksum(tx);
+	end_atomic_buffer_modify(fs, txbh);
+	spadfs_write_tx_block_backup(fs, tx, 0);
+	spadfs_brelse(fs, txbh);
 	return 0;
 }
 

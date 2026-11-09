@@ -201,3 +201,18 @@ more; the apage index still has no checksum. Root runs by the operator on
 sealed and matching, fsck agrees, a damaged apage stops the mount),
 `mount_smoke.sh` (fragmenting fill), `crash_logwrites.sh`, `cc_wrap_mount.sh`
 (fsck's reset pass rewrites every apage).
+
+## 2026-11-09: apage index CRC-32C
+
+The txblock carries a CRC-32C per apage index copy (apage_index_crc[2]); the
+driver updates the copy's CRC at every index write and checks the live copy
+at mount. Every metadata structure now has a CRC-32C. Root runs by the
+operator on 7.3.0_1, all pass:
+
+| Test | What it covers |
+|---|---|
+| `tests/apage_index_mount.sh` (new) | a 256 MiB, 512-byte-block volume fragmented until an apage splits (copy 0 -> 1, 2 apages in use); the driver's CRC matches, fsck agrees, the volume remounts with all 1200 files; a flipped byte in an unused tail entry of the live copy (covered by nothing but the CRC) stops the mount with a bad apage index checksum, and fsck -y repairs it |
+| `tests/meta_csum_mount.sh`, `tests/mount_smoke.sh`, `tests/crash_logwrites.sh`, `tests/cc_wrap_mount.sh` | pass on the new txblock layout |
+
+The other mount tests use 64 MiB volumes, where a full list apage converts
+to a bitmap instead of splitting, so they never reach the index write.

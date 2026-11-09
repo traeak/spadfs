@@ -21,7 +21,7 @@ target whose contents the class can actually change.
 | txblock | word_dup | NOOP | n/a (no live bytes to change) |
 | txblock | block_copy | NOOP | n/a (no live bytes to change) |
 | txblock | xor_cancel | DETECTED | detected |
-| txblock | zero_out | NOOP | n/a (no live bytes to change) |
+| txblock | zero_out | DETECTED | detected |
 | apage_index | bitflip | DETECTED | detected |
 | apage_index | byte_transpose | NOOP | n/a (no live bytes to change) |
 | apage_index | word_swap | DETECTED | detected |
@@ -61,6 +61,6 @@ target whose contents the class can actually change.
 ## Summary
 
 - cases attempted: 49
-- detected: 38
+- detected: 39
 - **NOT detected: 0**
-- not applicable / harness error: 11
+- not applicable / harness error: 10

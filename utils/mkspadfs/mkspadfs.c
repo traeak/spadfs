@@ -166,6 +166,8 @@ static __u64 cct_crc_sectors;	/* CCT_CRC_UNITS rounded up to whole blocks */
 static __u64 cct_backup_sector;	/* Phase 3: mirror of the crash-count table */
 static __u64 cct_backup_crc_sector;
 static __u64 txblock_backup_sector;	/* second copy of the txblock */
+/* CRC-32C of apage index 0, for the txblock (struct txblock, apage_index_crc) */
+static __u32 apage_index_crc0;
 static __u64 root_fnode_sector;
 static __u64 root_dir_sector;
 
@@ -553,6 +555,9 @@ static void write_txbl(void)
 	CPU2SPAD16_LV(&txb->a_cc, 0);
 	CPU2SPAD32_LV(&txb->a_txc, 0);
 	CPU2SPAD32_LV(&txb->txflags, 0);
+	/* index 1 is never written by mkfs; its CRC is set when it first is */
+	CPU2SPAD32_LV(&txb->apage_index_crc[0], apage_index_crc0);
+	CPU2SPAD32_LV(&txb->apage_index_crc[1], 0);
 	txb->checksum = 0;	/* legacy 8-bit XOR field, now vestigial:
 				 * zeroed to a deterministic value so the trailer
 				 * covers it, and the txblock trailer is authoritative */
@@ -681,6 +686,7 @@ static void write_apage_index(__u64 ai)
 	struct apage_index_entry *aind = NULL;	/* warning go away */
 	int i;
 	__u64 ap = apages_sector + (n_apages - 1) * page_sectors;
+	__u32 crc = ~0U;
 	for (i = 0; i < n_apages; i++) {
 		print_progress(n_apages, i);
 		if (!(i * sizeof(struct apage_index_entry) & ((1 << block_bits) - 1))) {
@@ -691,9 +697,11 @@ static void write_apage_index(__u64 ai)
 		CPU2SPAD64_LV(&aind->apage, ap);
 		ap -= page_sectors;
 		CPU2SPAD64_LV(&aind->end_sector, i < used_apages ? size_array[i] : 0);
+		crc = spadfs_crc32c_raw(crc, aind, sizeof(struct apage_index_entry));
 		aind++;
 	}
 	write_blocks(buffer, ai, block_sectors);
+	apage_index_crc0 = ~crc;
 }
 
 static int free_range(struct apage_head *a, __d_off off, __u32 len)
@@ -1008,14 +1016,15 @@ int main(int argc, const char * const argv[])
 	}
 	fprintf(stderr, "\rwriting user block...\n");
 	write_user();
-	fprintf(stderr, "\rwriting tx block...\n");
-	write_txbl();
 	fprintf(stderr, "\rwriting apages...\n");
 	write_apages();
 	fprintf(stderr, "\rwriting apage index...\n");
 	write_apage_index(apage_index_0_sector);
 	/*no need to write index 1 */
 	/*write_apage_index(apage_index_1_sector);*/
+	/* after the index: the txblock carries its CRC */
+	fprintf(stderr, "\rwriting tx block...\n");
+	write_txbl();
 	fprintf(stderr, "\rwriting crash count table...\n");
 	write_txct(cct_sector);
 	write_cct_crc(cct_crc_sector, 0);

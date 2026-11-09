@@ -1456,6 +1456,7 @@ __cold static int spadfs_fill_super(struct super_block *s, void *options, int si
 	int r;
 	unsigned i, n;
 	sector_t sec;
+	u32 index_crc[2];	/* from the txblock, checked once the index is loaded */
 	struct buffer_head *bh;
 	struct superblock *sb;
 	struct txblock *tb;
@@ -1764,6 +1765,8 @@ read_again:
 	fs->a_cc = tb->a_cc;  /* fs->a_cc and fs->a_txc are in disk-endianity */
 	fs->a_txc = tb->a_txc;
 	fs->txflags = SPAD2CPU32_LV(&tb->txflags);
+	index_crc[0] = SPAD2CPU32_LV(&tb->apage_index_crc[0]);
+	index_crc[1] = SPAD2CPU32_LV(&tb->apage_index_crc[1]);
 
 	if (unlikely(fs->txflags & TXFLAGS_DIRTY))
 		spadfs_error(fs, 0,
@@ -1915,6 +1918,19 @@ read_again:
 		}
 		spadfs_memcpy((u8 *)fs->apage_index + ((unsigned long)i << 9), p, 512U << fs->sectors_per_buffer_bits);
 		spadfs_brelse(fs, bh);
+	}
+	{
+		unsigned copy = !CC_VALID(fs, &fs->a_cc, &fs->a_txc);
+		u32 crc = spadfs_crc32c_std(fs->apage_index,
+				(size_t)fs->n_apages * sizeof(struct apage_index_entry));
+
+		if (unlikely(crc != index_crc[copy])) {
+			spadfs_error(fs, TXFLAGS_CHECKSUM_ERROR,
+				"bad checksum on apage index %u: stored %08x computed %08x",
+				copy, index_crc[copy], crc);
+			r = -EFSERROR;
+			goto err3;
+		}
 	}
 
 	fs->apage_info = spadfs_alloc(fs->n_apages, sizeof(struct apage_info), 0);

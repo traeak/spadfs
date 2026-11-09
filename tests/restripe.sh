@@ -40,11 +40,11 @@
 #   cct, cct_live                  side CRC region   sckcct.c:158
 #   root_dir                       header crc32c      sckdir.c  (fnode_block: CRC at
 #                                                   header offset 24; no trailer)
-#   apage_index                    NONE              no checksum call site exists
+#   apage_index                    txblock crc32c    sckapage.c  (a CRC per index
+#                                                   copy, kept in the txblock)
 #
-# apage_index cannot be isolated -- with no checksum there is nothing to
-# restripe, so normal and restriped are identical by construction. Reported as
-# such rather than silently folded into the counts.
+# A target with no checksum could not be isolated -- there would be nothing to
+# restripe -- and is reported as such. None is left; UNPROTECTED is empty.
 #
 # Runs without root. Output is markdown; redirect to
 # tests/BASELINE-restripe-attribution.md.
@@ -61,7 +61,7 @@ TARGETS=(superblock txblock root_fnode root_dir cct cct_live apage_index)
 CLASSES=(bitflip byte_transpose word_swap word_dup block_copy xor_cancel zero_out)
 
 # Targets whose restripe is a no-op because nothing protects them.
-UNPROTECTED=(apage_index)
+UNPROTECTED=()
 
 is_unprotected() {
 	local t
@@ -122,6 +122,7 @@ protection_of() {
 		superblock|txblock|root_fnode) printf 'crc32c trailer' ;;
 		cct|cct_live)                  printf 'side CRC region' ;;
 		root_dir)                    printf 'header crc32c' ;;
+		apage_index)                 printf 'txblock crc32c' ;;
 		*)                           printf 'none' ;;
 	esac
 }

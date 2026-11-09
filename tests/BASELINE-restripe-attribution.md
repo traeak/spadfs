@@ -22,7 +22,7 @@ detection that survives restriping is purely structural.
 | txblock | word_dup | crc32c trailer | NOOP | NOOP | n/a |
 | txblock | block_copy | crc32c trailer | NOOP | NOOP | n/a |
 | txblock | xor_cancel | crc32c trailer | DETECTED | DETECTED | structural only |
-| txblock | zero_out | crc32c trailer | NOOP | NOOP | n/a |
+| txblock | zero_out | crc32c trailer | DETECTED | DETECTED | structural only |
 | root_fnode | bitflip | crc32c trailer | DETECTED | DETECTED | structural only |
 | root_fnode | byte_transpose | crc32c trailer | DETECTED | DETECTED | structural only |
 | root_fnode | word_swap | crc32c trailer | DETECTED | DETECTED | structural only |
@@ -51,25 +51,25 @@ detection that survives restriping is purely structural.
 | cct_live | block_copy | side CRC region | NOOP | NOOP | n/a |
 | cct_live | xor_cancel | side CRC region | DETECTED | MISSED | CRC ONLY |
 | cct_live | zero_out | side CRC region | DETECTED | MISSED | CRC ONLY |
-| apage_index | bitflip | none | DETECTED | DETECTED | no checksum to isolate |
-| apage_index | byte_transpose | none | NOOP | NOOP | n/a |
-| apage_index | word_swap | none | DETECTED | DETECTED | no checksum to isolate |
-| apage_index | word_dup | none | DETECTED | DETECTED | no checksum to isolate |
-| apage_index | block_copy | none | NOOP | NOOP | n/a |
-| apage_index | xor_cancel | none | DETECTED | DETECTED | no checksum to isolate |
-| apage_index | zero_out | none | DETECTED | DETECTED | no checksum to isolate |
+| apage_index | bitflip | txblock crc32c | DETECTED | DETECTED | structural only |
+| apage_index | byte_transpose | txblock crc32c | NOOP | NOOP | n/a |
+| apage_index | word_swap | txblock crc32c | DETECTED | DETECTED | structural only |
+| apage_index | word_dup | txblock crc32c | DETECTED | DETECTED | structural only |
+| apage_index | block_copy | txblock crc32c | NOOP | NOOP | n/a |
+| apage_index | xor_cancel | txblock crc32c | DETECTED | DETECTED | structural only |
+| apage_index | zero_out | txblock crc32c | DETECTED | DETECTED | structural only |
 
 ## Summary
 
 - cases attempted: 49
 - **caught by the checksum and nothing else (CRC ONLY): 15**
-- caught structurally even with the checksum satisfied: 18
+- caught structurally even with the checksum satisfied: 24
 - missed in both modes: 0
-- not isolable (no checksum on target) / no-op / error: 16
+- not isolable (no checksum on target) / no-op / error: 10
 
 ## Verdict
 
-**The CRC layer is load-bearing in 15 of 33 isolable cases.** Those are
+**The CRC layer is load-bearing in 15 of 39 isolable cases.** Those are
 corruptions that fsck sees ONLY because the checksum disagrees with the
 payload -- structural validation alone misses them entirely. Restriping
 is what makes that visible; the pre-Phase-2 baseline could not tell.

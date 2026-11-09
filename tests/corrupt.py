@@ -53,13 +53,15 @@ from prime import crc32c_std, META_COVER, META_CRC_POS  # noqa: E402
 #   cct side CRC      sckcct.c:158 (region written by mkspadfs, sealed per unit)
 #   header crc32c     sckdir.c (fnode_block: CRC at header offset 24, covering
 #                     every other byte -- it cannot take a trailer)
-#   NONE              apage_index -- no checksum call site exists for it at all
+#   txblock crc32c    apage_index -- a CRC per copy, kept in the txblock
+#                     (struct txblock, apage_index_crc; sckapage.c)
 # ---------------------------------------------------------------------------
 
 TRAILER_TARGETS = {"superblock", "txblock", "root_fnode"}
 CCT_SIDE_TARGETS = {"cct", "cct_live"}
 INNER_CRC_TARGETS = {"root_dir"}
-UNPROTECTED_TARGETS = {"apage_index"}
+UNPROTECTED_TARGETS = set()
+INDEX_CRC_TARGETS = {"apage_index"}
 
 CHECKSUM_BASE = ord("C")          # struct.h:29
 FNODE_BLOCK_CRC_POS = 24          # struct.h, struct fnode_block
@@ -100,6 +102,36 @@ def inner_crc(u, pos=FNODE_BLOCK_CRC_POS):
 def restripe_inner_crc(u, pos=FNODE_BLOCK_CRC_POS):
     """Re-seal an fnode_block: its CRC lives in the header, not a trailer."""
     u[pos:pos + 4] = inner_crc(u, pos).to_bytes(4, "little")
+
+
+def n_apages(info):
+    """N_APAGES (struct.h, the userspace form) for this volume."""
+    half = 1 << (info["sectors_per_page_bits"] + 9 - 1)
+    bitmap_bits = (half - 16 - 16) * 8      # BITMAP_SIZE(APAGE_USABLE(half))
+    conv = bitmap_bits << info["sectors_per_block_bits"]
+    mins = conv // 2                         # MIN_APAGE_SECTORS
+    return (info["size"] + mins - 1 - 1) // mins + 1
+
+
+def restripe_apage_index(f, info):
+    """Re-seal the live apage index copy: its CRC lives in the txblock, which
+    is then re-sealed too. The txblock backup is left alone -- fsck reads the
+    primary, and a backup that differs is not an error."""
+    tx_off = info["txblock"] * SECTOR
+    f.seek(tx_off)
+    tx = bytearray(f.read(SECTOR))
+    a_cc = int.from_bytes(tx[10:12], "little")
+    a_txc = int.from_bytes(tx[12:16], "little")
+    f.seek(info["cct"] * SECTOR + a_cc * 4)
+    cct = int.from_bytes(f.read(4), "little")
+    copy = 0 if ((cct - a_txc) & 0xFFFFFFFF) < 0x80000000 else 1
+    base = info["apage_index0" if copy == 0 else "apage_index1"]
+    f.seek(base * SECTOR)
+    entries = f.read(n_apages(info) * 16)
+    tx[32 + 4 * copy:36 + 4 * copy] = (crc32c_std(entries) & 0xFFFFFFFF).to_bytes(4, "little")
+    restripe_trailer(tx)
+    f.seek(tx_off)
+    f.write(tx)
 
 
 def restripe_cct_side(f, info, cct_sector):
@@ -313,6 +345,8 @@ def main():
                         f.write(cur)
                     elif target in CCT_SIDE_TARGETS:
                         restripe_cct_side(f, info, base_sector + unit)
+                    elif target in INDEX_CRC_TARGETS:
+                        restripe_apage_index(f, info)
 
                 print(f"changed at {target}/{cls} byte={off + anchor if anchor is not None else off} "
                       f"sector={base_sector + unit} unit={unit}/{extent}"
