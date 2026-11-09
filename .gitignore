@@ -6,6 +6,8 @@ compile_flags.txt
 *.ko.unsigned
 *.mod.c
 *.o
+# tool header dependencies (gcc -MMD), next to each utils/ object
+/utils/**/*.d
 *.swp
 .*.d
 .*.tmp

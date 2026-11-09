@@ -35,17 +35,28 @@ ifneq (,$(findstring direct,$(AIO)))
 AIO_CFLAGS += -DDEFAULT_DIRECT
 endif
 
+# -MMD -MP writes a .d file next to each tool object listing the headers it
+# included, and those files are pulled in below. Without them an edit to a
+# shared header (struct.h, meta_crc.h) rebuilt only the .c files that were
+# touched too, and the tools linked objects compiled against the old layout:
+# a 24 -> 32 byte fnode_block header change left sckfxfn.o reading the old
+# fixed_fnode_block offsets, and spadfsck rejected every kernel-written
+# volume with a hard link.
+DEPFLAGS := -MMD -MP
+
 # Per-tool banner macro, so diagnostics name the binary that is actually running
 # instead of a hardcoded "SPADFSCK"/"MKSPADFS". These pattern rules are more
 # specific than the generic %.o rule below (shorter stem), so make prefers them.
 utils/spadfsck/%.o : utils/spadfsck/%.c
-	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) -DTOOL_BANNER='"$(FSCK_TOOL)"' -c -o $@ -x c $<
+	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) $(DEPFLAGS) -DTOOL_BANNER='"$(FSCK_TOOL)"' -c -o $@ -x c $<
 
 utils/mkspadfs/%.o : utils/mkspadfs/%.c
-	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) -DTOOL_BANNER='"$(MKFS_TOOL)"' -c -o $@ -x c $<
+	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) $(DEPFLAGS) -DTOOL_BANNER='"$(MKFS_TOOL)"' -c -o $@ -x c $<
 
 %.o : %.c
-	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) -c -o $@ -x c $<
+	$(SPADFS_CC) $(SPADFS_CFLAGS) $(AIO_CFLAGS) $(DEPFLAGS) -c -o $@ -x c $<
+
+-include $(wildcard utils/*.d utils/*/*.d)
 
 $(MKFS_TOOL) : \
 	utils/crc32c.o \
@@ -85,7 +96,7 @@ clean-kernel:
 	-rm -rf .tmp_versions/
 
 clean-userspace:
-	-rm -f */*.o */*/*.o $(MKFS_TOOL) $(FSCK_TOOL)
+	-rm -f */*.o */*/*.o */*.d */*/*.d $(MKFS_TOOL) $(FSCK_TOOL)
 
 clean : clean-kernel clean-userspace
 
