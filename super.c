@@ -1013,6 +1013,32 @@ int spadfs_commit_unlocked(SPADFS *fs)
 	if (unlikely(r))
 		spadfs_error(fs, TXFLAGS_IO_WRITE_ERROR, "write error: %d", r);
 
+	/*
+	 * Flush BEFORE the cct write. sync_blockdev() only waits for the
+	 * metadata writes to complete; on a device with a volatile write cache
+	 * that is not durability, and the cache may reorder. Without this
+	 * flush the cct block can reach media ahead of the metadata it
+	 * commits, and after a power cut the commit reads as done while some
+	 * of its structures never arrived (e.g. an apage marking blocks used
+	 * whose fnode was never written, or the reverse).
+	 *
+	 * This is the first of the two flushes INTERNALS describes ("all
+	 * metadata buffers are written, disk cache is flushed, memory_cct is
+	 * written to disk and disk cache is flushed again"); v1.0.22 had only
+	 * the second. A kernel crash cannot expose the gap -- the drive keeps
+	 * its cache -- only power loss can.
+	 *
+	 * If the flush fails, do not write the cct: committing metadata whose
+	 * durability we could not establish is exactly what this prevents.
+	 */
+	rr = spadfs_issue_flush(fs);
+	if (unlikely(rr)) {
+		spadfs_update_error_flags(fs);
+		if (!r)
+			r = rr;
+		goto unlock_ret;
+	}
+
 	sector = fs->cc / (512 / 4);
 	sector &= ~((1U << fs->sectors_per_buffer_bits) - 1);
 	cct_data = spadfs_get_new_sector(fs, fs->cct_sec + sector, &bh,
