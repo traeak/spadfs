@@ -17,6 +17,12 @@
 # or crash_cycle.sh leave one at /mnt/spadcrash). Writes $MNT/commitcost.* and
 # removes them. Read-only with respect to everything else.
 
+# NOTE: this used to commit with a global `sync`, which also flushes every
+# other filesystem on the machine; the 27 / 56.7 / 72.2 ms figures in
+# HARDWARE-NOTES.md were taken that way and are not comparable with each
+# other, let alone with this. It now uses syncfs on the spadfs volume only.
+# To compare two modules, use tests/commit_cost_ab.sh (same sitting,
+# alternating rounds, medians).
 set -uo pipefail
 
 DEV=${DEV:-/dev/sda1}
@@ -54,7 +60,7 @@ w0=$(sectors_written)
 t0=$(date +%s%N)
 for i in $(seq 1 "$ITERS"); do
 	echo "$i" >"$MNT/commitcost.$i"
-	sync
+	sync -f "$MNT"
 done
 t1=$(date +%s%N)
 w1=$(sectors_written)

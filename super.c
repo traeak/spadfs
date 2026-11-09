@@ -825,7 +825,7 @@ static int spadfs_write_cct_crc(SPADFS *fs, sector_t base,
 /*
  * Clear the backup's epoch stamp before the primary moves on without it.
  *
- * A valid stamp promises the mirror is at most the commit in progress behind
+ * A valid stamp promises the mirror is at most one commit behind
  * (struct.h). Once we stop mirroring, that promise is false, and a stamp left
  * in place would let fsck restore an arbitrarily old mirror unattended.
  * Clearing it makes fsck ask a human instead.
@@ -951,6 +951,12 @@ static void spadfs_cct_backup_start(SPADFS *fs)
  * and the stamp unit (which holds the new txc even when the touched sector
  * lives in another unit). Runs after the primary is durable, so a crash here
  * leaves a good primary and, at worst, a mirror fsck must recreate.
+ *
+ * Written synchronously (so write errors are seen) but NOT flushed: the
+ * next commit's pre-cct flush, or the flush at unmount / remount read-only,
+ * makes it durable. That keeps the mirror current at every point where a
+ * crash can tear the primary, for one cache flush per commit instead of
+ * two -- see the stamp invariant in struct.h for the window it leaves.
  */
 static void spadfs_cct_backup_commit(SPADFS *fs, unsigned first,
 				     unsigned last)
@@ -970,8 +976,6 @@ static void spadfs_cct_backup_commit(SPADFS *fs, unsigned first,
 		r = spadfs_write_cct_crc(fs, fs->cct_backup_crc_sec,
 					 CCT_BACKUP_STAMP_UNIT,
 					 CCT_BACKUP_STAMP_UNIT, 1);
-	if (likely(!r))
-		r = spadfs_issue_flush(fs);
 	if (unlikely(r))
 		spadfs_cct_backup_failed(fs, r);
 }
@@ -1030,6 +1034,11 @@ int spadfs_commit_unlocked(SPADFS *fs)
 	 *
 	 * If the flush fails, do not write the cct: committing metadata whose
 	 * durability we could not establish is exactly what this prevents.
+	 *
+	 * This flush also makes the PREVIOUS commit's cct mirror durable (it is
+	 * written unflushed, spadfs_cct_backup_commit). So if this commit's cct
+	 * and CRC writes below are torn by a crash, the mirror holds the last
+	 * acknowledged commit and fsck restores exactly that.
 	 */
 	rr = spadfs_issue_flush(fs);
 	if (unlikely(rr)) {
@@ -1120,8 +1129,8 @@ int spadfs_commit_unlocked(SPADFS *fs)
 
 		/*
 		 * The primary is durable; now bring the mirror to the same
-		 * state. Its own flush means the mirror is never left behind
-		 * by more than the commit in progress. Never fails the commit.
+		 * state, unflushed (the next commit's pre-cct flush covers it).
+		 * Never fails the commit.
 		 */
 		if (fs->cct_backup_live)
 			spadfs_cct_backup_commit(fs, sector, last);

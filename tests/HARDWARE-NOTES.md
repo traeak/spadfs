@@ -98,3 +98,29 @@ crash states is still unrecorded.
 
 The old module leaves its apage and dnode unsealed; the current one
 seals both, so the test separates them.
+
+## 2026-11-09: mirror flush dropped (3 flushes per commit -> 2)
+
+The cct backup mirror is now written without its own flush; the next
+commit's pre-cct flush (or unmount / remount-ro) makes it durable, so the
+durable mirror is at most one commit behind and is never ahead. Root runs
+by the operator on 7.3.0_1:
+
+| Test | Result |
+|---|---|
+| `tests/crash_logwrites.sh` | pass, including the lagging-mirror crash states |
+| `tests/cct_mirror_mount.sh` | pass (its two earlier "no kernel message" failures were the test's line-counted dmesg window, now replaced by a log marker) |
+
+Commit cost, `tests/commit_cost_ab.sh` on `/dev/sda1`: 100 commits per
+round, 5 rounds per module, modules alternated, `syncfs` on the spadfs
+volume only.
+
+| Module | Flushes/commit | Median ms/commit | Range | KiB/commit |
+|---|---|---|---|---|
+| A: HEAD before this change | 3 | 56.4 | 55.4-57.6 | 42.3 |
+| B: mirror flush dropped | 2 | 44.7 | 43.9-45.5 | 42.2 |
+
+B - A = -11.6 ms/commit (-21%); the ranges do not overlap. Bytes written
+are the same, so one cache flush on this disk costs about 11-12 ms. The
+earlier single-run figures (27, 56.7 and 72.2 ms) used global `sync` and are
+not comparable with these.

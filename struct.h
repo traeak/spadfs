@@ -159,9 +159,24 @@ struct userblock {
  * reserved must be zero.
  *
  * THE INVARIANT a valid stamp promises, and that every writer must keep:
- * the mirror is at most the commit in progress behind the primary. The
- * kernel keeps it by copying the whole cct when it goes read-write and
- * mirroring every commit after the primary is durable; mkspadfs and
+ * the durable mirror is never ahead of the primary and at most ONE commit
+ * behind it. The kernel copies the whole cct when it goes read-write, then
+ * writes each commit's mirror after that commit's primary is durable but
+ * does not flush it: the next commit's pre-cct flush (or the flush at
+ * unmount / remount read-only) makes it durable. So:
+ *
+ *   - whenever a crash can tear the primary (inside a commit's cct
+ *     interval, after its pre-cct flush) the mirror is exactly the last
+ *     acknowledged commit, and restoring it loses only the unacknowledged
+ *     commit in progress -- what a crash does anyway;
+ *   - between a commit returning and the next flush the mirror may lag by
+ *     that acknowledged commit. Only damage to the primary that is NOT a
+ *     torn commit write (media failure) inside that window can make a
+ *     restore lose it. That window is the price of one flush per commit:
+ *     measured 56.7 ms/commit with the mirror flushed vs 27 ms before the
+ *     mirror existed (tests/HARDWARE-NOTES.md).
+ *
+ * mkspadfs and
  * spadfsck keep it by writing an exact copy. A writer that is about to let
  * the primary move on WITHOUT updating the mirror (the primary failed its
  * CRCs at mount, or a mirror write failed) must first clear the stamp

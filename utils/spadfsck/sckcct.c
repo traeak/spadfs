@@ -520,10 +520,13 @@ int check_cct_backup(void)
  * alternate: files created since vanish, deleted files return, renames
  * unwind. How much is lost depends entirely on how old the backup is.
  *
- * The kernel keeps the mirror one flush behind the primary (Task 3.3), so a
- * backup from the current epoch is at most the commit in progress behind --
- * restoring it is the same rollback a crash performs, and is safe to do
- * unattended. A backup from an older epoch, or one with no stamp, is the
+ * The kernel keeps the durable mirror at most one commit behind the primary
+ * (struct.h). When a crash tore the primary -- the case that brings us here
+ * -- the mirror is exactly the last acknowledged commit, so restoring it is
+ * the same rollback a crash performs, and is safe to do unattended. Only
+ * media damage to the primary right after a commit, before the next flush,
+ * can make the restore cost that one acknowledged commit; the alternative
+ * there is a full reset, which is far worse. A backup from an older epoch, or one with no stamp, is the
  * silent-reversion case and stays Q_IMPORTANT: a human must say YES.
  *
  * The common way to get here is a crash during a commit, between the cct
@@ -580,7 +583,7 @@ int repair_cct_backup(void)
 			log_printf(0, "CRASH COUNT TABLE IS DAMAGED BUT ITS BACKUP VERIFIES");
 			log_printf(0, "THE BACKUP IS FROM THE CURRENT CRASH EPOCH (CC %X TXC %08X, VOLUME CC %X)",
 				   cct_backup_stamp_cc, (unsigned)cct_backup_stamp_txc, cc);
-			log_printf(0, "RESTORING IT ROLLS BACK AT MOST THE COMMIT IN PROGRESS");
+			log_printf(0, "RESTORING IT ROLLS BACK AT MOST THE LAST COMMIT");
 			yes = query(qprefix 0, "RESTORE CRASH COUNT TABLE FROM BACKUP?");
 		} else {
 			log_printf(0, "CRASH COUNT TABLE IS DAMAGED BUT ITS BACKUP VERIFIES");
