@@ -1,6 +1,7 @@
 # Next steps after the 2026-11-09 design review
 
-**Status: planned, not started.** Written at the end of the session that
+**Status: planned, not started.** (Open performance questions added after
+the benchmarks; see the last section.) Written at the end of the session that
 finished roadmap Phases 0–5 and the long-symlink half of Phase 6 (branch
 `modernization`, last commit `0537a47`). Do these in order; each has its own
 reason for coming before the next.
@@ -139,3 +140,41 @@ Write this up as `docs/superpowers/plans/<date>-phase6-sparse-files.md` with
 the options, the crash argument for the chosen one, the on-disk changes in
 all three readers, the tests, and an effort estimate -- then decide with the
 operator whether to build it.
+
+---
+
+## Open performance questions (from the benchmarks, commit `9d0b0b1`)
+
+Added after the review. The side-by-side rig now exists:
+`tests/build_reference.sh` builds v1.0.22 as `spadfs`, and `tests/bench_ab.sh`
+compares any number of filesystems on one scratch device (root; it erases
+the device). Results so far are in `tests/HARDWARE-NOTES.md`. On the
+operator's laptop SATA disk, at 20 000 files per directory, spadfs2 was
+40-90% faster than ext4 and XFS at create/stat/unlink, matched XFS on commit
+and single-writer fsync, and trailed XFS by 14% on 8-writer fsync. These
+questions remain; none blocks Steps 1-3, but re-run the comparison after
+Step 1 if it adds ordered writeback, since that could cost part of the
+commit and fsync advantage.
+
+1. **Create regression that grows with directory size.** Against v1.0.22,
+   spadfs2's create costs +3 us per file at 20 000 files and +17 us at
+   200 000 (+30%: 11.4 -> 14.8 s), so it is not fixed per-file CPU work
+   (CRCs, SipHash). Leading hypothesis, unconfirmed: building a large
+   directory forces commits partway through (e.g. `NEED_SYNC` from
+   `spadfs_add_fnode_to_directory`), and each now costs one more flush
+   (~12 ms); ~280 of them would explain the 3.4 s. To confirm, count flush
+   requests per phase -- the block layer's diskstats flush field reads 0
+   on this kernel, so use tracing (`block:block_rq_issue`, flush requests
+   have F in rwbs) -- or count commits in the driver. Compare v1.0.22 and
+   spadfs2 with `tests/bench_ab.sh -f 200000`.
+2. **Large directories against ext4 and XFS.** Does spadfs2 keep its create
+   lead at 200 000+ names, given (1)?
+   `sudo bash tests/bench_ab.sh -f 200000 ./spadfs2.ko spadfs2 ./mkspadfs2 - ext4,noinit_itable 'mkfs.ext4 -F -q' - xfs 'mkfs.xfs -f -q'`
+3. **Fast storage and many cores.** On the HDD every writer mostly waits on
+   an ~11 ms flush; on NVMe, lock contention dominates instead, and that is
+   where spadfs2's single filesystem-wide `sync_lock` (commits take it
+   exclusively) should fall further behind XFS's allocation groups than the
+   14% seen on 8-writer fsync. Needs an erasable NVMe scratch partition, and
+   probably a higher writer count (`fsync_rate` in bench_ab.sh is
+   parameterised by writer count). Aged, fragmented volumes are also
+   untested: every round starts from a fresh mkfs.
