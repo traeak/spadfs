@@ -41,6 +41,9 @@ jobs:
       - name: cct backup recovery matrix (epoch stamp)
         run: bash tests/cct_recovery.sh
 
+      - name: dm-log-writes replayer (crash-state enumeration and oracle)
+        run: python3 tests/logwrites_test.py
+
       - name: Structured corruption detection baseline
         run: bash tests/detect.sh > baseline.md
 

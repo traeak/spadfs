@@ -97,6 +97,7 @@ test : $(MKFS_TOOL) $(FSCK_TOOL) crc-agreement
 	bash tests/cct_integrity.sh > tests/BASELINE-cct-integrity.md
 	bash tests/cct_recovery.sh
 	bash tests/cc_wrap.sh
+	python3 tests/logwrites_test.py
 	bash tests/restripe.sh > tests/BASELINE-restripe-attribution.md
 	@echo "regenerated both BASELINE files in tests/"
 
