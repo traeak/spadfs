@@ -19,6 +19,11 @@
 # tests/cc_wrap_mount.sh.
 
 set -uo pipefail
+# Under pipefail, `cmd | grep -q x` takes cmd's exit status: spadfsck exits
+# non-zero when it reports anything, and a producer can die of SIGPIPE once
+# grep -q has matched. That turns a match into "no match" -- a false FAIL on
+# a presence check and, worse, a false PASS on an absence check. So output is
+# captured first and grepped from a here-string.
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$TESTS_DIR/lib.sh"
@@ -64,7 +69,8 @@ primed() { # cc -> path of a fresh image primed to that crash count
 
 # --- 1/2: the threshold ---------------------------------------------------
 img=$(primed $((THRESHOLD - 1)))
-if "$FSCK" -n "$img" 2>&1 | grep -q 'HIGH CRASH COUNT'; then
+out=$("$FSCK" -n "$img" 2>&1)
+if grep -q 'HIGH CRASH COUNT' <<<"$out"; then
 	bad "cc just below the threshold is silent" "fsck warned at $((THRESHOLD - 1))"
 else
 	ok "cc just below the threshold is silent"
@@ -73,7 +79,8 @@ fi
 for cc in $THRESHOLD $((0xffff)); do
 	img=$(primed "$cc")
 	want=$(printf 'HIGH CRASH COUNT REACHED (%04X)' "$cc")
-	if "$FSCK" -n "$img" 2>&1 | grep -qF "$want"; then
+	out=$("$FSCK" -n "$img" 2>&1)
+	if grep -qF "$want" <<<"$out"; then
 		ok "cc $(printf %04x "$cc"): fsck reports it"
 	else
 		bad "cc $(printf %04x "$cc"): fsck reports it" "no '$want'"
@@ -106,7 +113,8 @@ if check_clean "$img" -n; then
 else
 	bad "after reset a forced check is clean" "fsck -n -f not clean"
 fi
-if "$FSCK" -n "$img" 2>&1 | grep -q 'HIGH CRASH COUNT'; then
+out=$("$FSCK" -n "$img" 2>&1)
+if grep -q 'HIGH CRASH COUNT' <<<"$out"; then
 	bad "after reset the warning is gone" "still warns"
 else
 	ok "after reset the warning is gone"

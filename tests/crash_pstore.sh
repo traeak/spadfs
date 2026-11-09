@@ -40,9 +40,12 @@ size_to_bytes() {
 # contains oops markers too, and panic is the stronger claim.
 pstore_classify() {
 	local text=${1:-}
-	if printf '%s\n' "$text" | grep -q 'Kernel panic - not syncing'; then
+	# here-strings, not `printf | grep -q`: callers run under pipefail, and a
+	# record bigger than the pipe buffer kills printf with SIGPIPE once grep
+	# has matched -- which would file a real panic as "none"
+	if grep -q 'Kernel panic - not syncing' <<<"$text"; then
 		printf 'panic\n'
-	elif printf '%s\n' "$text" | grep -qE 'BUG: unable to handle|Oops:|kernel BUG at'; then
+	elif grep -qE 'BUG: unable to handle|Oops:|kernel BUG at' <<<"$text"; then
 		printf 'oops\n'
 	else
 		printf 'none\n'

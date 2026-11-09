@@ -77,7 +77,7 @@ if [ "$ROOT_SRC" = "$DEV" ]; then
 	echo "REFUSING: $DEV is the root device" >&2
 	exit 1
 fi
-if ! id -u | grep -qx 0; then
+if [ "$(id -u)" != 0 ]; then
 	echo "must run as root" >&2
 	exit 1
 fi

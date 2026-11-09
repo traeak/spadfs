@@ -47,6 +47,13 @@ assert_eq "classify panic text" "panic" "$(pstore_classify "$PANIC_TEXT")"
 assert_eq "classify oops text" "oops" "$(pstore_classify "$OOPS_TEXT")"
 assert_eq "classify benign text" "none" "$(pstore_classify "$BENIGN")"
 assert_eq "classify empty text" "none" "$(pstore_classify "")"
+# A record far larger than a pipe buffer, panic line first. The old
+# `printf | grep -q` under pipefail lost printf to SIGPIPE after the match
+# and filed this as "none" -- a real crash reported as a clean reboot.
+BIG_PANIC="Kernel panic - not syncing: big record
+$(printf '%0300000d' 0 | fold -w 100)"
+assert_eq "classify a panic record larger than a pipe buffer" "panic" \
+	"$(pstore_classify "$BIG_PANIC")"
 
 # a log with BOTH must report panic, not oops — panic is the stronger claim
 assert_eq "classify prefers panic when both present" "panic" \

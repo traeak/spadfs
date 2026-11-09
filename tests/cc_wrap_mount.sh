@@ -15,6 +15,11 @@
 # SPADFS_KO selects a module other than the one built in this tree.
 
 set -uo pipefail
+# Under pipefail, `cmd | grep -q x` takes cmd's exit status: spadfsck exits
+# non-zero when it reports anything, and a producer can die of SIGPIPE once
+# grep -q has matched. That turns a match into "no match" -- a false FAIL on
+# a presence check and, worse, a false PASS on an absence check. So output is
+# captured first and grepped from a here-string.
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
@@ -78,7 +83,11 @@ do_umount() {
 	losetup -d "$LOOP"
 	LOOP=""
 }
-mounted_rw() { findmnt -n -o OPTIONS "$MNT" | tr ',' '\n' | grep -qx rw; }
+mounted_rw() {
+	local opts
+	opts=$(findmnt -n -o OPTIONS "$MNT") || return 1
+	grep -qx rw <<<"${opts//,/$'\n'}"
+}
 
 # ------------------------------------------------------------- quiet --
 img="$WORKDIR/quiet.img"
@@ -86,8 +95,9 @@ primed "$img" $((0xfefe))
 kmark
 if do_mount "$img"; then
 	mounted_rw && ok "quiet: read-write" || bad "quiet: read-write" "mounted read-only"
-	if klog | grep -q 'crash count is'; then
-		bad "quiet: no warning below the threshold" "$(klog | grep 'crash count')"
+	log=$(klog)
+	if grep -q 'crash count is' <<<"$log"; then
+		bad "quiet: no warning below the threshold" "$(grep 'crash count' <<<"$log")"
 	else
 		ok "quiet: no warning below the threshold"
 	fi
@@ -103,7 +113,8 @@ kmark
 if do_mount "$img"; then
 	mounted_rw && ok "warn: still read-write" || bad "warn: still read-write" "mounted read-only"
 	want='crash count is ff11 of ffff, headroom for 238 more unclean shutdown(s)'
-	if klog | grep -qF "$want"; then
+	log=$(klog)
+	if grep -qF "$want" <<<"$log"; then
 		ok "warn: warns with the exact headroom"
 	else
 		bad "warn: warns with the exact headroom" "want '$want'; got: $(klog | tail -3)"
@@ -127,7 +138,8 @@ if do_mount "$img"; then
 	else
 		ok "ceiling: refuses writes"
 	fi
-	if klog | grep -qF 'crash count wrap-around, remounting read-only; run spadfsck --reset-crash-counts'; then
+	log=$(klog)
+	if grep -qF 'crash count wrap-around, remounting read-only; run spadfsck --reset-crash-counts' <<<"$log"; then
 		ok "ceiling: says how to recover"
 	else
 		bad "ceiling: says how to recover" "$(klog | tail -3)"
@@ -146,8 +158,9 @@ got=$(tx_cc "$img")
 kmark
 if do_mount "$img"; then
 	mounted_rw && ok "reset: read-write again" || bad "reset: read-write again" "mounted read-only"
-	if klog | grep -q 'crash count'; then
-		bad "reset: no crash-count message" "$(klog | grep 'crash count')"
+	log=$(klog)
+	if grep -q 'crash count' <<<"$log"; then
+		bad "reset: no crash-count message" "$(grep 'crash count' <<<"$log")"
 	else
 		ok "reset: no crash-count message"
 	fi

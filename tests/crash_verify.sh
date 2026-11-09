@@ -143,16 +143,18 @@ echo "$FSCK_OUT"
 echo "fsck exit code: $FSCK_RC"
 echo
 
+# here-strings, not `echo | grep -q`: under pipefail a large fsck report can
+# kill echo with SIGPIPE after grep matched, reading damage as "healthy"
 CCT_CRC_BAD=0
-echo "$FSCK_OUT" | grep -q "^CCT CRC UNIT .* CHECKSUM MISMATCH" && CCT_CRC_BAD=1
+grep -q "^CCT CRC UNIT .* CHECKSUM MISMATCH" <<<"$FSCK_OUT" && CCT_CRC_BAD=1
 CCT_UNTRUSTWORTHY=0
-echo "$FSCK_OUT" | grep -q "CCT CRC TABLE UNTRUSTWORTHY" && CCT_UNTRUSTWORTHY=1
+grep -q "CCT CRC TABLE UNTRUSTWORTHY" <<<"$FSCK_OUT" && CCT_UNTRUSTWORTHY=1
 # fsck prints NOTHING when a region is fine -- "BACKUP VERIFIES" only appears
 # when the primary is damaged and the backup is the good copy. So the backup's
 # own health is the absence of backup error lines, not the presence of a
 # success line.
 BACKUP_BAD=0
-echo "$FSCK_OUT" | grep -qE "CCT BACKUP (CRC UNIT .* CHECKSUM MISMATCH|CORRUPT|REGION|SECTOR .* DOES NOT MATCH)|CANT READ CCT BACKUP" && BACKUP_BAD=1
+grep -qE "CCT BACKUP (CRC UNIT .* CHECKSUM MISMATCH|CORRUPT|REGION|SECTOR .* DOES NOT MATCH)|CANT READ CCT BACKUP" <<<"$FSCK_OUT" && BACKUP_BAD=1
 echo "cct CRC region self-consistent : $([ $CCT_CRC_BAD -eq 0 ] && echo YES || echo NO)"
 echo "cct declared untrustworthy     : $([ $CCT_UNTRUSTWORTHY -eq 0 ] && echo no || echo YES)"
 echo "backup mirror healthy          : $([ $BACKUP_BAD -eq 0 ] && echo YES || echo NO)"
