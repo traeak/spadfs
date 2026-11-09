@@ -69,9 +69,9 @@ primed() { # primed IMG CC
 
 # Kernel messages since the last mark. A line count, not dmesg -c: the test
 # must not erase the host's log.
-KMARK=0
-kmark() { KMARK=$(dmesg | wc -l); }
-klog() { dmesg | tail -n +"$((KMARK + 1))"; }
+# klog_mark / klog_since: tests/lib.sh (a marker, not a line count)
+kmark() { klog_mark; }
+klog() { klog_since; }
 
 do_mount() {
 	LOOP=$(losetup --find --show "$1") || return 1
@@ -95,7 +95,7 @@ primed "$img" $((0xfefe))
 kmark
 if do_mount "$img"; then
 	mounted_rw && ok "quiet: read-write" || bad "quiet: read-write" "mounted read-only"
-	log=$(klog)
+	log=$(klog) || die "kernel log marker lost; rerun"
 	if grep -q 'crash count is' <<<"$log"; then
 		bad "quiet: no warning below the threshold" "$(grep 'crash count' <<<"$log")"
 	else
@@ -113,7 +113,7 @@ kmark
 if do_mount "$img"; then
 	mounted_rw && ok "warn: still read-write" || bad "warn: still read-write" "mounted read-only"
 	want='crash count is ff11 of ffff, headroom for 238 more unclean shutdown(s)'
-	log=$(klog)
+	log=$(klog) || die "kernel log marker lost; rerun"
 	if grep -qF "$want" <<<"$log"; then
 		ok "warn: warns with the exact headroom"
 	else
@@ -138,7 +138,7 @@ if do_mount "$img"; then
 	else
 		ok "ceiling: refuses writes"
 	fi
-	log=$(klog)
+	log=$(klog) || die "kernel log marker lost; rerun"
 	if grep -qF 'crash count wrap-around, remounting read-only; run spadfsck --reset-crash-counts' <<<"$log"; then
 		ok "ceiling: says how to recover"
 	else
@@ -158,7 +158,7 @@ got=$(tx_cc "$img")
 kmark
 if do_mount "$img"; then
 	mounted_rw && ok "reset: read-write again" || bad "reset: read-write again" "mounted read-only"
-	log=$(klog)
+	log=$(klog) || die "kernel log marker lost; rerun"
 	if grep -q 'crash count' <<<"$log"; then
 		bad "reset: no crash-count message" "$(grep 'crash count' <<<"$log")"
 	else

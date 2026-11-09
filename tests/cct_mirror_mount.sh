@@ -131,7 +131,10 @@ for bs in 512 4096; do
 	fresh "$img" "$bs"
 	if do_mount "$img"; then
 		echo "acknowledged $bs" >"$MNT/acked.txt" && sync -f "$MNT/acked.txt"
-		# the state a power cut right now would leave: mounted, dirty
+		# mounted and dirty: every COMPLETED write, as a kernel crash right
+		# now would leave it. Not a power cut -- the mirror is written but
+		# not flushed until the next commit, so a lost drive cache could
+		# leave it one commit behind; tests/crash_logwrites.sh covers that.
 		cp --sparse=always "$img" "$snap"
 		do_umount
 		s=$(stamp "$snap")
@@ -165,11 +168,11 @@ for bs in 512 4096; do
 	fresh "$img" "$bs"
 	rot_cct "$img" 300
 	before=$(mirror_sum "$img")
-	dmesg_before=$(dmesg | wc -l)
+	klog_mark
 	if do_mount "$img"; then
 		echo "payload" >"$MNT/f.txt" && sync -f "$MNT/f.txt"
 		do_umount
-		new_dmesg=$(dmesg | tail -n +"$((dmesg_before + 1))")
+		new_dmesg=$(klog_since) || die "kernel log marker lost; rerun"
 		[ "$(mirror_sum "$img")" = "$before" ] \
 			&& ok "[$bs] damaged: the mirror's data was not overwritten" \
 			|| bad "[$bs] damaged: the mirror was overwritten from a damaged primary"

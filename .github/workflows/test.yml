@@ -47,8 +47,8 @@ jobs:
       - name: apage/dnode checksum scanner
         run: python3 tests/metasum_test.py
 
-      - name: No shell test pipes into grep -q (wrong under pipefail)
-        run: bash tests/lint_pipefail.sh
+      - name: Shell-test lint (grep -q pipes, line-counted kernel logs)
+        run: bash tests/lint_shell.sh
 
       - name: Structured corruption detection baseline
         run: bash tests/detect.sh > baseline.md

@@ -96,7 +96,7 @@ test : $(MKFS_TOOL) $(FSCK_TOOL) crc-agreement
 	bash tests/detect.sh > tests/BASELINE-checksum-detection.md
 	bash tests/cct_integrity.sh > tests/BASELINE-cct-integrity.md
 	bash tests/cct_recovery.sh
-	bash tests/lint_pipefail.sh
+	bash tests/lint_shell.sh
 	bash tests/cc_wrap.sh
 	python3 tests/logwrites_test.py
 	python3 tests/metasum_test.py

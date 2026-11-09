@@ -125,7 +125,7 @@ for bs in 512 4096; do
 			|| bad "[$bs] precondition: sector $sec not detected before mount" "$rep"
 	done
 
-	dmesg_before=$(dmesg | wc -l)
+	klog_mark
 	if mount_cycle "$img"; then
 		rep=$(cct_report "$img")
 		for sec in $ROT_SECTORS; do
@@ -133,9 +133,7 @@ for bs in 512 4096; do
 				&& ok "[$bs] rotted sector $sec still reported after mount + commit" \
 				|| bad "[$bs] mount + commit re-blessed rotted sector $sec" "$rep"
 		done
-		# capture first: grep -q can close the pipe early, and pipefail
-		# would turn tail's SIGPIPE into a false FAIL
-		new_dmesg=$(dmesg | tail -n +"$((dmesg_before + 1))")
+		new_dmesg=$(klog_since) || die "kernel log marker lost; rerun"
 		grep -qF "crash count table: $nrot of 512 cct sector" <<<"$new_dmesg" \
 			&& ok "[$bs] kernel warned about the mismatch at mount" \
 			|| bad "[$bs] no mount-time warning" "$(grep spadfs <<<"$new_dmesg" | head -3)"

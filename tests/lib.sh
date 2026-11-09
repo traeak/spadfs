@@ -58,6 +58,32 @@ summary() {
 	return 0
 }
 
+# Kernel-log window for the root tests.
+#
+# Never count lines (`dmesg | wc -l`, then `tail -n +N`): once the ring
+# buffer is full, old lines drop off as new ones arrive, the count stops
+# moving, and "everything after line N" comes back EMPTY -- a false FAIL on a
+# presence check and a false PASS on an absence check. A long run (e.g.
+# crash_logwrites.sh mounting hundreds of crash states) fills the buffer.
+#
+# Instead write a unique marker into the log and read what follows it. If
+# the marker itself has scrolled out, klog_since fails rather than return a
+# misleadingly empty window; callers must stop on that.
+KLOG_MARK=""
+klog_mark() {
+	KLOG_MARK="spadfs-test-mark-$$-$(date +%s%N)"
+	echo "$KLOG_MARK" > /dev/kmsg
+}
+klog_since() {
+	local all
+	all=$(dmesg)
+	if [ -z "$KLOG_MARK" ] || ! grep -qF "$KLOG_MARK" <<<"$all"; then
+		echo "klog_since: test marker not in the kernel log (never set, or scrolled out)" >&2
+		return 1
+	fi
+	sed -n "/$KLOG_MARK/,\$p" <<<"$all" | tail -n +2
+}
+
 # Scratch space, cleaned on exit.
 WORKDIR="${TMPDIR:-/tmp}/spadfs-tests.$$"
 mkdir -p "$WORKDIR"
