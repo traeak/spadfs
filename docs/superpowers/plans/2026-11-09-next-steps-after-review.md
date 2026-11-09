@@ -210,9 +210,13 @@ commit and fsync advantage.
    on this kernel, so use tracing (`block:block_rq_issue`, flush requests
    have F in rwbs) -- or count commits in the driver. Compare v1.0.22 and
    spadfs2 with `tests/bench_ab.sh -f 200000`.
-2. **Large directories against ext4 and XFS.** Does spadfs2 keep its create
-   lead at 200 000+ names, given (1)?
-   `sudo bash tests/bench_ab.sh -f 200000 ./spadfs2.ko spadfs2 ./mkspadfs2 - ext4,noinit_itable 'mkfs.ext4 -F -q' - xfs 'mkfs.xfs -f -q'`
+2. **Large directories against ext4 and XFS -- answered.** At 200 000 names
+   spadfs2 keeps the fastest median create, but the lead narrows to 15-22%
+   (ext4's best round beat it); unlink and 1-writer fsync leads hold. Two
+   new findings to explain (tests/HARDWARE-NOTES.md): ext4's cold stat is
+   27% faster at this size (wide spread), and spadfs2's sequential read is
+   5-7% behind after the small-file churn -- check the big file's placement
+   with `filefrag -v` under each filesystem.
 3. **Fast storage and many cores.** On the HDD every writer mostly waits on
    an ~11 ms flush; on NVMe, lock contention dominates instead, and that is
    where spadfs2's single filesystem-wide `sync_lock` (commits take it

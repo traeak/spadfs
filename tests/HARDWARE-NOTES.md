@@ -364,3 +364,29 @@ medians:
   directory size, see above), SSD/NVMe, many cores, aged volumes, and equal
   crash guarantees for file data (spadfs2's data ordering is the open
   question in docs/superpowers/plans/2026-11-09-next-steps-after-review.md).
+
+Rerun at 200 000 files (`-f 200000`), same command otherwise, medians
+(ext4's spread in brackets where it is wide):
+
+| Metric | spadfs2 | ext4 | XFS |
+|---|---|---|---|
+| commit, syncfs (ms) | 34.75 | 129.82 | 35.55 |
+| create 200k + sync (s) | 14.75 | 17.32 (14.50-21.62) | 18.94 |
+| cold stat 200k (s) | 2.81 | 2.22 (1.65-4.64) | 2.80 |
+| unlink 200k + sync (s) | 0.94 | 2.89 | 10.31 |
+| fsync, 1 writer (ops/s) | 29 | 15 | 22 |
+| fsync, 8 writers (ops/s) | 50 | 48 | 57 |
+| seq write (MB/s) | 97.8 | 96.2 | 92.4 |
+| seq read, cold (MB/s) | 101.9 | 107.5 | 109.6 |
+
+- Create: spadfs2 keeps the fastest median, but the lead narrows from 40%+
+  at 20k to 15-22%; ext4's best round (14.50 s) beat spadfs2's.
+- Cold stat: ext4's median is 27% faster at this size (it was slower at
+  20k), with a wide spread. Plausible, unverified: spadfs2 reads ~30 MB of
+  directory pages holding the inode data, in hash order, while ext4 reads
+  compact directory blocks and inode tables in order, which readahead suits.
+- Seq read: spadfs2 is 5-7% behind only at this size, where the big file is
+  written after 200k files were created and deleted; with no delayed
+  allocation it may sit further in or in pieces. Check with filefrag -v.
+- Unlink (3-11x faster than ext4/XFS) and 1-writer fsync leads hold; XFS
+  still leads 8-writer fsync by 14%.
