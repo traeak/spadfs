@@ -8,6 +8,38 @@
 > statement of what the code in this tree actually does.
 >
 > Evidence is cited as `file:line` against v1.0.22.
+>
+> **Updated 2026-11-09 for spadfs2.** The analysis below is kept as the record of
+> what v1.0.22 does; where spadfs2 has since changed a point, a *spadfs2* note
+> says so and cites functions rather than line numbers. Two claims were wrong
+> even about v1.0.22 and are corrected in place: the crash count is consumed per
+> unclean shutdown, not per mount, and commits do not spread wear across the
+> crash-count table. The next section summarises what spadfs2 has changed.
+
+---
+
+## spadfs2 status
+
+What the spadfs2 branch has done about the findings below, as of 2026-11-09.
+Every format change was made in all three readers (kernel, mkspadfs,
+spadfsck) and proven by a real mount; `tests/HARDWARE-NOTES.md` has the runs.
+
+| Finding | spadfs2 |
+|---|---|
+| 8-bit XOR checksums | **CRC-32C** on the superblock, txblock, userblock, anode and fixed fnode block (512-byte trailer), the fnode block (in a header grown from 24 to 32 bytes, because its fnode chain must tile to byte 512) and the crash-count table (a side CRC region). **Apage halves and dnode versions still use the 8-bit XOR fold**, and the apage index has no checksum at all. |
+| Checksum checks gated by a bit in the block, `--no-checksums` | Checksums are always on. Every reader verifies every block whatever its `*_CHECKSUM_VALID` bit says; the option, the mount options and the superblock flag are gone. |
+| Kernel never verified apage or dnode checksums | The kernel seals both on every write and verifies the active half/version when it is read. |
+| `cct[]` single point of failure | A full mirror with its own CRC region and an epoch stamp, kept current by every commit; spadfsck restores from it. |
+| txblock single point of failure (not in the original list) | A second copy, written at every txblock write; spadfsck restores from it. |
+| Commit ordering (not in the original list) | v1.0.22 wrote the cct with no cache flush before it, so after a power cut the commit could be durable while its metadata was not. A flush now precedes the cct write. Proven with dm-log-writes crash-state replay (`tests/crash_logwrites.sh`). |
+| Commit cost | Two cache flushes per commit (before and after the cct). Measured 44.7 ms per `syncfs` commit on a laptop SATA disk, where one flush costs about 11–12 ms (`tests/commit_cost_ab.sh`). |
+| 2^16 crash-count ceiling | Kept: `cc` indexes the cct, so widening it means a 16 GiB table or a redesign. The kernel warns from 0xff00; `spadfsck --reset-crash-counts` recovers. |
+| Symlink limit | 164 characters (was 172): the larger fnode block header took 8 bytes from the EA pool. |
+| Kernel support | Floor raised to 6.1 LTS; `linux-compat.h` is 171 lines. |
+
+Still open: the 8-bit XOR on apages and dnodes and the unprotected apage index;
+all redundant copies sit near the start of the volume except the superblock's;
+the hash benchmark (Phase 5); sparse files and the symlink limit (Phase 6).
 
 ---
 
@@ -33,7 +65,8 @@ than the docs admit.
 CC_VALID:  (s32)(cct[cc] - txc) >= 0        /* spadfs.h:550 */
 ```
 
-- `cc` = 16-bit **crash count**, one consumed per mount.
+- `cc` = 16-bit **crash count**, one consumed per **unclean shutdown**: a
+  read-write mount takes one and a clean unmount gives it back.
 - `txc` = 32-bit **transaction count** within that crash epoch.
 - Structures are written to disk *before* they are valid.
 - Commit = **one 4-byte increment made durable in `cct[]`**.
@@ -53,19 +86,24 @@ mount. That single expression is the whole scheme.
 |---|---|---|
 | Mount after crash | no replay | replay, O(journal size) |
 | Metadata write amplification | 1× | 2–3× (journal + inode) |
-| Commit cost | 4 B into rotating 256 KiB table | full barrier + journal block |
+| Commit cost | one cct sector (spadfs2: plus its CRC unit and the mirror's, two cache flushes) | full barrier + journal block |
 | fsck after clean crash | never | occasionally |
 
-The **wear story is better than a journal header**. In `spadfs_commit_unlocked`:
+**Correction: commits do not spread wear.** In `spadfs_commit_unlocked`:
 
 ```c
 sector = fs->cc / (512 / 4);                    /* super.c:706 */
 sector &= ~((1U << fs->sectors_per_buffer_bits) - 1);
 ```
 
-Each commit writes a *different* 512-byte region, rotating across the full table as
-`cc` advances. On flash that is ~65 536 distinct wear points instead of one hot
-block. Genuinely nice property, and not obvious until you look at the arithmetic.
+The sector written is the one holding `cct[cc]`, and `cc` only moves on an
+unclean shutdown. On a volume that is mostly unmounted cleanly, every commit
+rewrites the **same** cct block for the life of the volume. (An earlier version
+of this document read the arithmetic as rotating across the table; it does
+not.) In spadfs2 each commit also rewrites the matching block of the cct's CRC
+region and of the mirror and its CRC region, so there are four hot blocks, not
+one. That is a journal-header-like pattern, which flash wear levelling handles
+but which the design gets no special credit for.
 
 ### What it costs
 
@@ -75,15 +113,25 @@ block. Genuinely nice property, and not obvious until you look at the arithmetic
   the one failure mode that cannot be resolved by local reasoning. A damaged journal
   means replay stops; a damaged counter table means nothing can be trusted.
 
+  *spadfs2:* the cct has a side CRC region and a full mirror. The kernel brings
+  the mirror up to date after every commit, unflushed: the next commit's first
+  flush makes it durable, so the durable mirror is never ahead of the primary
+  and at most one commit behind. An epoch stamp in the mirror's CRC region lets
+  spadfsck tell a current mirror from a stale one, because restoring a stale
+  one would silently revert committed data.
+
 - **Coarse commit granularity.** You cannot durably commit transaction *N* without
   committing *N-1*. `datasync` is threaded through `spadfs_write_file`
   (`dir.c:995`) but the epoch is global. Semantically acceptable, but one
   fsync-heavy process drags every other process's metadata to disk with it.
 
-- **2^16 crashes.** `cc` is `__u16`; each mount burns one. The README's claim of
-  "2^47 transactions" is honest, but the *2^16 mount* ceiling is a real
-  operational cliff requiring fsck to clear. A long-lived fleet, or anything doing
-  frequent mount/unmount (containers, ephemeral VMs), can reach it.
+- **2^16 crashes.** `cc` is `__u16`. **Correction:** an earlier version of this
+  document said each mount burns one. It does not: a read-write mount increments
+  `tx.cc` and a clean unmount or remount read-only steps it back
+  (`spadfs_increase_cc`). Only an unclean shutdown consumes one, so the ceiling is
+  65 535 crashes, not mounts. Frequent clean mount/unmount does not approach it.
+  At the ceiling the kernel mounts read-only and `spadfsck --reset-crash-counts`
+  recovers (spadfs2 also warns from 0xff00).
 
 - **Dual-versioning tax.** Because uncommitted writes must coexist with committed
   ones, nearly every mutable structure is doubled:
@@ -124,14 +172,16 @@ the best-disciplined corner of the tree.
 ## Bet 2: The fnode — inode in the directory
 
 `struct fnode` is **56 bytes** of header, then name (≤255), then the EA pool
-(≤176), inside a 512-byte `fnode_block` (`struct.h:316-349`). Verified sizes:
+(≤168 in spadfs2, 176 in v1.0.22), inside a 512-byte `fnode_block`
+(`struct.h:316-349`). Verified sizes:
 
 ```
-sizeof(struct fnode)      = 56      (FNODE_NAME_POS)
-FNODE_MAX_SIZE            = 488
-FNODE_EA_POS(255)         = 312
-FNODE_MAX_EA_SIZE         = 176
-sizeof(fnode_block hdr)   = 24
+                          spadfs2   v1.0.22
+sizeof(struct fnode)      = 56        56      (FNODE_NAME_POS)
+FNODE_MAX_SIZE            = 480      488
+FNODE_EA_POS(255)         = 312      312
+FNODE_MAX_EA_SIZE         = 168      176
+sizeof(fnode_block hdr)   = 32       24      (spadfs2: + CRC-32C + reserved)
 ```
 
 **Win.** `open()` is one seek. No inode table, no block-group lookup, no
@@ -169,7 +219,7 @@ of per block — turning a disaster into roughly 12% overhead. Good engineering,
 it papers over the architectural choice, and it is *tunable* rather than *solved*.
 
 **Second cost.** Rename is a **move, not a pointer swap**. Renaming across
-directories relocates the whole fnode (up to 488 bytes) and rehashes. Renaming
+directories relocates the whole fnode (up to 480 bytes) and rehashes. Renaming
 within a directory is delete + create + possible dnode split. ext4 renames a
 directory entry in tens of bytes.
 
@@ -304,8 +354,8 @@ the right compat story and it is actually implemented, not merely promised.
 `RESIZE_EA` (`struct.h:414`) and `REMOVE_EA` (`struct.h:440`) memmove the pool
 correctly.
 
-But 176 bytes total, and symlinks live *inside* the EA → **172-character symlink
-limit** vs 4096 on ext4/XFS. A direct consequence of the "no extra indirection for
+But 176 bytes total (168 in spadfs2), and symlinks live *inside* the EA →
+**172-character symlink limit** (164 in spadfs2) vs 4096 on ext4/XFS. A direct consequence of the "no extra indirection for
 small files" philosophy taken slightly too far. Long symlinks are rare, but this is
 a hard wall.
 
@@ -341,6 +391,14 @@ detection by orders of magnitude. The design has *excellent* crash semantics and
 *poor* corruption-detection semantics underneath them. That mismatch is the most
 dangerous thing in the tree.
 
+*spadfs2:* see the status table at the top. In short: CRC-32C everywhere a
+512-byte unit or a side region allows; checksums can no longer be turned off and
+no reader trusts the per-block valid bit; the kernel now seals and verifies
+apages and dnodes. What remains on the 8-bit XOR fold is the apage halves and
+dnode versions, and the apage index has no checksum. `tests/detect.sh` and
+`tests/restripe.sh` measure detection per structure and per corruption class,
+and separate what the checksum catches from what structural checks catch.
+
 **No data checksums at all.** Metadata only, and weakly. Silent data corruption is
 undetectable. Fine for a scratch/performance filesystem; not fine for archival —
 which the "no fsck needed" pitch actively invites people to assume.
@@ -352,12 +410,19 @@ which the "no fsck needed" pitch actively invites people to assume.
 `blkdev_issue_flush` signatures (`super.c:488-496`). Impressive maintenance, and
 pure out-of-tree tax. Upstreaming would delete most of it.
 
+*spadfs2:* the floor is 6.1 LTS and distribution-kernel support is dropped;
+`linux-compat.h` is 171 lines with four version gates left.
+
 ---
 
 ## Ranked weaknesses
 
 1. **8-bit XOR checksum under a design that trusts it absolutely.** Fix first —
    crc32c per 512 B unit.
+
+   *spadfs2: mostly done.* CRC-32C on every structure except apage halves and
+   dnode versions (still the 8-bit fold, now always sealed and verified) and
+   the apage index (no checksum). Checksums can no longer be switched off.
 2. **`cct[]` is a single point of failure** with no visible redundancy. A second
    copy of the table — or even just the current epoch's entry, mirrored — costs
    256 KiB and removes the worst failure mode.
@@ -370,6 +435,11 @@ pure out-of-tree tax. Upstreaming would delete most of it.
    the asymmetry is narrower than stated, and more importantly: **a redundancy
    pattern already exists in this codebase to follow.** Mirroring `cct` is not
    inventing new machinery, it is applying a precedent the format already uses.
+
+   *spadfs2: done.* The cct has a mirror with its own CRC region and an epoch
+   stamp, and the txblock has a second copy. Both sit near the primary, so a
+   bad sector or torn write is covered but damage to the start of the volume
+   is not; only the superblock has a copy at the far end.
 3. **File size in the directory block** → append dirties the parent dir; contention
    on hot directories. Prealloc mitigates, does not solve.
 4. **Hash quality unverified.** `*15` plus low-bits-first is a known-weak
@@ -383,11 +453,27 @@ pure out-of-tree tax. Upstreaming would delete most of it.
    zeroes the table and resets `tx.cc` to 0. The residual risk is *operational*
    — reaching the ceiling without noticing — not structural. Downgraded from a
    format concern to a monitoring/warning task.
-7. **172-char symlink cap.** Arbitrary consequence of EA sizing.
+
+   *spadfs2:* the ceiling is per unclean shutdown, not per mount (see Bet 1).
+   The kernel warns from 0xff00 and states the remaining headroom; tested by
+   `tests/cc_wrap.sh` and `tests/cc_wrap_mount.sh`.
+7. **172-char symlink cap.** Arbitrary consequence of EA sizing. *spadfs2:* 164,
+   after the fnode block header grew for its CRC. Phase 6 of the roadmap.
 8. **No sparse files.** Documented and deliberate, but a real gap for VM images,
    databases, and git.
 9. **No `open_by_handle_at` / NFS export.** Partly a Linux `ino_t` width problem,
    but the design chose not to fight it.
+
+Found later, while working on spadfs2:
+
+10. **No cache flush before the commit point.** v1.0.22 waited for metadata
+    writes to complete, which is not durability, then wrote the cct and flushed
+    once. After a power cut the commit could read as done while its metadata
+    never arrived. *spadfs2: fixed* (flush before the cct write), and proven by
+    replaying every crash state with dm-log-writes.
+11. **The txblock existed once.** It holds the current crash count, which apage
+    index is live, the error flags and the next inode number. *spadfs2: fixed*
+    (second copy, restored by spadfsck).
 
 ---
 
@@ -395,7 +481,7 @@ pure out-of-tree tax. Upstreaming would delete most of it.
 
 This is a **serious, coherent design**, not a hack. The crash-count scheme is a
 legitimate alternative to journaling with real, measurable advantages — no replay,
-no double-write, rotating commit-point wear — and the author understood exactly
+no double-write — and the author understood exactly
 where the bodies are buried: the dual-versioning of every mutable structure, the
 monotone-append anode that avoids needing it, the reserved spare apages bounding
 the randomized allocator's tail.
@@ -418,3 +504,8 @@ corruption model is 1990s-grade.** Fix the checksum, mirror the counter table, a
 benchmark the hash, and the design becomes genuinely strong. Without those, a bad
 cable doesn't lose you a file — it loses you the ability to tell which files you
 have.
+
+*spadfs2:* the checksum is fixed for every structure but apages and dnodes, the
+counter table is mirrored, the commit point is now correctly ordered behind its
+metadata, and the txblock has a second copy. The hash benchmark is still
+outstanding.

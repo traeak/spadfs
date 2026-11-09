@@ -145,7 +145,9 @@ The positive control (the `HEAD` module before this change must fail the
 ## 2026-11-09: fnode_block header CRC (Phase 1b of the checksum follow-up)
 
 The fnode_block header grew from 24 to 32 bytes to hold a CRC-32C over the
-rest of the block, replacing the last 8-bit XOR checksum in the format.
+rest of the block, replacing its 8-bit XOR fold. (Apage halves and dnode
+versions still use the 8-bit fold; an earlier version of this note and the
+commit message of 228b65f wrongly called this the last one.)
 FNODE_MAX_SIZE 488 -> 480, FNODE_MAX_EA_SIZE 176 -> 168 (symlinks up to 164
 characters, was 172), fixed_fnode_block fnode slots 232 -> 224. Root runs
 by the operator on 7.3.0_1, all pass: `meta_csum_mount.sh` (both block
