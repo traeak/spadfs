@@ -777,7 +777,12 @@ retry:
 	if (unlikely((long long)long_prealloc < 0))
 		long_prealloc = 0;
 	ts = 0;
-	if (spadfnode(i)->disk_size >= fs->cluster_threshold && likely(!target_blocks_exact)) {
+	/*
+	 * Preallocation is for regular files: a long symlink's UNX attribute
+	 * must record none (spadfs_get_ea_unx rejects it on a non-file).
+	 */
+	if (spadfnode(i)->disk_size >= fs->cluster_threshold && likely(!target_blocks_exact) &&
+	    likely(S_ISREG(i->i_mode))) {
 		uint64_t ts64;
 		uint64_t ds = spadfnode(i)->disk_size;
 		if (likely(fs->prealloc_part_bits >= 0))

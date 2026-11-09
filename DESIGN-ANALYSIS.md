@@ -35,10 +35,10 @@ spadfsck) and proven by a real mount; `tests/HARDWARE-NOTES.md` has the runs.
 | Commit cost | Two cache flushes per commit (before and after the cct). Measured 44.7 ms per `syncfs` commit on a laptop SATA disk, where one flush costs about 11–12 ms (`tests/commit_cost_ab.sh`). |
 | 2^16 crash-count ceiling | Kept: `cc` indexes the cct, so widening it means a 16 GiB table or a redesign. The kernel warns from 0xff00; `spadfsck --reset-crash-counts` recovers. |
 | Directory hash (Bet 3) | Measured with `tests/hashsim.py`: no clustering up to 1M names, but linear and unkeyed, so crafted names could force one leaf chain (346 page reads per lookup for 16 384 names). Replaced with keyed SipHash-2-4, per-volume random seed in the superblock. |
-| Symlink limit | 164 characters (was 172): the larger fnode block header took 8 bytes from the EA pool. |
+| Symlink limit | Targets up to 4095 characters (PATH_MAX - 1). Up to 164 stay in the EA pool (172 in v1.0.22; the larger fnode block header took 8 bytes); longer ones are stored as the symlink's file data, marked by an empty SYM attribute. |
 | Kernel support | Floor raised to 6.1 LTS; `linux-compat.h` is 171 lines. |
 
-Still open: sparse files and the symlink limit (Phase 6).
+Still open: sparse files (Phase 6).
 
 ---
 
@@ -385,6 +385,13 @@ But 176 bytes total (168 in spadfs2), and symlinks live *inside* the EA →
 small files" philosophy taken slightly too far. Long symlinks are rare, but this is
 a hard wall.
 
+*spadfs2:* no longer a wall. A target that does not fit in the EA pool is
+stored as the symlink's file data -- the fnode is laid out like a regular file,
+with a UNX attribute of mode S_IFLNK and an empty SYM attribute as the marker --
+up to 4095 characters. The driver writes the target to disk before `symlink()`
+returns, because a commit does not write file data and a committed symlink must
+not resolve through a stale block.
+
 ### Checksums — the weakest link
 
 `__byte_sum` (`struct.h:947`) is an XOR-fold returning **8 bits**:
@@ -494,8 +501,9 @@ pure out-of-tree tax. Upstreaming would delete most of it.
    *spadfs2:* the ceiling is per unclean shutdown, not per mount (see Bet 1).
    The kernel warns from 0xff00 and states the remaining headroom; tested by
    `tests/cc_wrap.sh` and `tests/cc_wrap_mount.sh`.
-7. **172-char symlink cap.** Arbitrary consequence of EA sizing. *spadfs2:* 164,
-   after the fnode block header grew for its CRC. Phase 6 of the roadmap.
+7. **172-char symlink cap.** Arbitrary consequence of EA sizing. *spadfs2:
+   fixed.* Targets up to 164 characters stay in the EA pool; longer ones, up
+   to 4095, are stored as the symlink's data, like ext4's slow symlinks.
 8. **No sparse files.** Documented and deliberate, but a real gap for VM images,
    databases, and git.
 9. **No `open_by_handle_at` / NFS export.** Partly a Linux `ino_t` width problem,

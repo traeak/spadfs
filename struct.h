@@ -683,6 +683,15 @@ static __finline__ void REMOVE_EA(__u8 *ea_pool, unsigned *ea_pool_size,
 #define EA_UNX_MAGIC_OLD	((0x00584E55 |				\
 		((sizeof(struct ea_unx) - sizeof(struct fnode_ea)) << 24)) & \
 		EA_UNX_MAGIC_MASK)
+/*
+ * A SYM attribute holding the target is a short symlink: up to 164
+ * characters (FNODE_MAX_EA_SIZE less the attribute header), with the stable
+ * inode number and owner in the fnode's run fields. A zero-length SYM
+ * attribute marks a long symlink, laid out like a regular file: a UNX
+ * attribute of mode S_IFLNK, and the target, up to PATH_MAX - 1 characters,
+ * as the file data. All three readers check that the marker and the
+ * symlink mode come together.
+ */
 #define EA_SYMLINK_MAGIC_MASK	FNODE_EA_MAGIC_MASK
 #define EA_SYMLINK_MAGIC	0x004D5953
 #define EA_RDEV_MAGIC_MASK	((__u32)~0)

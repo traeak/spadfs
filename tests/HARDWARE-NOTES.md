@@ -255,3 +255,23 @@ by the operator on 7.3.0_1, all pass: `meta_csum_mount.sh` (a 3000+ name
 directory split by the new hash; spadfsck's placement check agrees with the
 driver for every name), `apage_index_mount.sh` (2400 names), `mount_smoke.sh`,
 `crash_logwrites.sh`, `cc_wrap_mount.sh`.
+
+## 2026-11-09: long symlinks (Phase 6, first half)
+
+Targets over 164 characters, up to 4095, are stored as the symlink's file
+data: UNX attribute of mode S_IFLNK, an empty SYM attribute as the marker.
+Root runs by the operator on 7.3.0_1, all pass: `symlink_mount.sh` (new: 1,
+164, 165, 1000 and 4095 characters read back, 4096 refused, a long target
+followed, fsck clean, targets survive a remount, deletes free the blocks;
+both block sizes), `crash_logwrites.sh` (new op 14: a 400-character symlink;
+every acknowledged crash state shows the exact target), `mount_smoke.sh`,
+`meta_csum_mount.sh`.
+
+Three bugs were found by the root runs before they passed: page_symlink was
+given strlen instead of strlen + 1 (it writes len - 1 bytes), so every long
+target lost its last character; the fnode written while the target's block
+was allocated but i_size still 0 encoded that block as preallocation, which
+both readers reject on a non-file; and nothing wrote the fnode after the
+target -- the driver writes a file's fnode on extend, fsync, truncate,
+setattr and close, and a symlink is never opened -- so the size and runs
+were never recorded (12 lost sectors at 512-byte blocks).

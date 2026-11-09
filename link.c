@@ -125,3 +125,17 @@ struct inode_operations spadfs_symlink_iops = {
 	.listxattr = spadfs_listxattr,
 #endif
 };
+
+/*
+ * A long symlink: the target does not fit in the fnode's EA pool, so it is
+ * stored as the file data (written by spadfs_symlink with page_symlink) and
+ * read back through the page cache.
+ */
+const struct inode_operations spadfs_long_symlink_iops = {
+	.get_link = page_get_link,
+	.setattr = spadfs_file_setattr,
+	.getattr = spadfs_getattr,
+#ifdef SPADFS_XATTR
+	.listxattr = spadfs_listxattr,
+#endif
+};

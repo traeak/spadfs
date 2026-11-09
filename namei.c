@@ -746,6 +746,7 @@ static int spadfs_symlink(
 	struct fnode_ea *ea;
 	unsigned strlen_symlink;
 	unsigned ea_size;
+	int long_link;
 	u64 stable_ino;
 	umode_t mode;
 	uid_t uid;
@@ -762,10 +763,23 @@ static int spadfs_symlink(
 	mode = S_IFLNK | S_IRWXUGO;
 	spadfs_get_initial_attributes(dir, &mode, &uid, &gid);
 
+	/*
+	 * A target that fits in the EA pool stays there (a short symlink).
+	 * A longer one becomes a long symlink: the fnode is laid out like a
+	 * regular file -- UNX attribute with mode S_IFLNK, plus a zero-length
+	 * SYM attribute as the marker -- and the target is written as its data
+	 * once the fnode exists (struct.h, EA_SYMLINK_MAGIC).
+	 */
 	strlen_symlink = strlen(symlink);
 	ea_size = FNODE_EA_DO_ALIGN(sizeof(struct fnode_ea) + strlen_symlink);
-	if (unlikely(ea_size > FNODE_MAX_EA_SIZE))
-		return -ENAMETOOLONG;
+	long_link = ea_size > FNODE_MAX_EA_SIZE;
+	if (unlikely(long_link)) {
+		/* page_get_link reads the target from the first page */
+		if (unlikely(strlen_symlink >= PAGE_SIZE))
+			return -ENAMETOOLONG;
+		ea_size = FNODE_EA_DO_ALIGN(sizeof(struct ea_unx)) +
+			  FNODE_EA_DO_ALIGN(sizeof(struct fnode_ea));
+	}
 
 lock_and_again:
 	ND_LOCK(fs, wlock);
@@ -795,12 +809,22 @@ lock_and_again:
 	fnode->size[0] = CPU2SPAD64_CONST(0);
 	fnode->size[1] = CPU2SPAD64_CONST(0);
 	fnode->ctime = fnode->mtime = CPU2SPAD32((u32)ctime);
-	fnode->run10 = CPU2SPAD32(stable_ino);
-	fnode->run11 = CPU2SPAD16(stable_ino >> 32);
-	fnode->run1n = CPU2SPAD16(stable_ino >> 48);
-	fnode->run20 = CPU2SPAD32(uid);
-	fnode->run21 = CPU2SPAD16(gid);
-	fnode->run2n = CPU2SPAD16(gid >> 16);
+	if (likely(!long_link)) {
+		fnode->run10 = CPU2SPAD32(stable_ino);
+		fnode->run11 = CPU2SPAD16(stable_ino >> 32);
+		fnode->run1n = CPU2SPAD16(stable_ino >> 48);
+		fnode->run20 = CPU2SPAD32(uid);
+		fnode->run21 = CPU2SPAD16(gid);
+		fnode->run2n = CPU2SPAD16(gid >> 16);
+	} else {
+		/* the runs are the target's data, allocated when it is written */
+		fnode->run10 = MAKE_PART_0(0);
+		fnode->run11 = MAKE_PART_1(0);
+		fnode->run1n = CPU2SPAD16_CONST(0);
+		fnode->run20 = MAKE_PART_0(0);
+		fnode->run21 = MAKE_PART_1(0);
+		fnode->run2n = CPU2SPAD16_CONST(0);
+	}
 	fnode->anode0 = MAKE_PART_0(0);
 	fnode->anode1 = MAKE_PART_1(0);
 	fnode->flags = 0;
@@ -809,13 +833,27 @@ lock_and_again:
 			(const char *)dentry->d_name.name, dentry->d_name.len);
 	ea = (struct fnode_ea *)((char *)fnode +
 					FNODE_EA_POS(dentry->d_name.len));
-	CPU2SPAD32_LV(&ea->magic,
-		EA_SYMLINK_MAGIC | (strlen_symlink << FNODE_EA_SIZE_SHIFT));
-	memcpy_and_pad((char *)(ea + 1), ea_size - sizeof(struct fnode_ea),
-		       symlink, strlen_symlink, 0);
+	if (likely(!long_link)) {
+		CPU2SPAD32_LV(&ea->magic,
+			EA_SYMLINK_MAGIC | (strlen_symlink << FNODE_EA_SIZE_SHIFT));
+		memcpy_and_pad((char *)(ea + 1), ea_size - sizeof(struct fnode_ea),
+			       symlink, strlen_symlink, 0);
+	} else {
+		struct fnode_ea *marker = (struct fnode_ea *)((char *)ea +
+				FNODE_EA_DO_ALIGN(sizeof(struct ea_unx)));
+
+		spadfs_init_unx_attribute(dir, (struct ea_unx *)ea, mode,
+					  stable_ino);
+		memset(marker, 0, FNODE_EA_DO_ALIGN(sizeof(struct fnode_ea)));
+		CPU2SPAD32_LV(&marker->magic, EA_SYMLINK_MAGIC);
+	}
 	do_fnode_block_checksum(fs, fnode_block);
 	end_concurrent_atomic_buffer_modify(fs, bh);
 
+	/*
+	 * S_IFREG for both: spadfs_get_ea_unx starts from a regular file and
+	 * takes the real mode from the attributes, as for any fnode it loads.
+	 */
 	inode = spadfs_new_inode(dir, S_IFREG, ctime, ea, ea_size,
 				 fnode_address, fnode_off, 0, stable_ino);
 	spadfs_brelse(fs, bh);
@@ -823,11 +861,55 @@ lock_and_again:
 		r = PTR_ERR(inode);
 		goto remove_entry_unlock_ret_r;
 	}
-	i_uid_write(inode, uid);
-	i_gid_write(inode, gid);
+	if (likely(!long_link)) {
+		i_uid_write(inode, uid);
+		i_gid_write(inode, gid);
+	}
 	spadfs_update_directory_times(dir);
-	d_instantiate(dentry, inode);
 	ND_UNLOCK(fs, wlock);
+	if (unlikely(long_link)) {
+		/*
+		 * Write the target outside the namespace lock (the data path
+		 * takes the filesystem lock itself), and get it to disk before
+		 * returning: a commit does not write file data, and a symlink
+		 * that committed pointing at a stale block would resolve to
+		 * whatever path was left there. The next commit's first flush
+		 * then makes it durable before the commit point.
+		 */
+		/*
+		 * page_symlink's length includes the terminating NUL: it
+		 * writes len - 1 bytes and sets i_size to that (as ext2/ext4
+		 * call it, with strlen + 1).
+		 */
+		r = page_symlink(inode, symlink, strlen_symlink + 1);
+		if (likely(!r))
+			r = filemap_write_and_wait(inode->i_mapping);
+		/*
+		 * Then record the size and runs in the fnode. Nothing else
+		 * would: the driver writes a file's fnode on extend, fsync,
+		 * truncate, setattr and close, and a symlink is never opened,
+		 * so the last write would be the one made while the block was
+		 * allocated and i_size was still 0. Done after the data is on
+		 * disk, so the fnode never points at an unwritten target.
+		 */
+		if (likely(!r)) {
+			down_read_sync_lock(fs);
+			mutex_lock(&spadfnode(inode)->file_lock);
+			r = spadfs_write_file(spadfnode(inode), 0, NULL, NULL);
+			mutex_unlock(&spadfnode(inode)->file_lock);
+			up_read_sync_lock(fs);
+		}
+		if (unlikely(r)) {
+			ND_LOCK(fs, wlock);
+			spadfs_remove_fnode_from_directory(spadfnode(dir), NULL,
+							   &dentry->d_name);
+			ND_UNLOCK(fs, wlock);
+			clear_nlink(inode);
+			iput(inode);
+			return r;
+		}
+	}
+	d_instantiate(dentry, inode);
 	return 0;
 
 unlock_do_sync:

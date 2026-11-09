@@ -7,6 +7,9 @@
 #define FLAGS_NEED_RDEV		1
 #define FLAGS_HAVE_RDEV		2
 #define FLAGS_DONT_HAVE_RDEV	4
+#define FLAGS_UNX_SYMLINK	8	/* UNX attribute with mode S_IFLNK */
+#define FLAGS_SYMLINK_MARKER	16	/* zero-length SYM attribute: long symlink */
+#define FLAGS_SYMLINK_INLINE	32	/* SYM attribute holding the target */
 
 static char *ea_check_unx(struct fnode *fnode, struct ea_unx *unx, int type, int *flags, __u32 *prealloc)
 {
@@ -39,6 +42,8 @@ static char *ea_check_unx(struct fnode *fnode, struct ea_unx *unx, int type, int
 	} else {
 		if (__unlikely((SPAD2CPU32_LV(&unx->prealloc[0]) | SPAD2CPU32_LV(&unx->prealloc[1])) != 0)) return "UNX ATTRIBUTE ERROR: NON-FILE FNODE HAS PREALLOC";
 	}
+	if (LINUX_S_ISLNK(SPAD2CPU16_LV(&unx->mode)))
+		*flags |= FLAGS_UNX_SYMLINK;
 	if (__unlikely(LINUX_S_ISCHR(SPAD2CPU16_LV(&unx->mode))) || __unlikely(LINUX_S_ISBLK(SPAD2CPU16_LV(&unx->mode)))) {
 		if (*flags & FLAGS_DONT_HAVE_RDEV) return "UNX ATTRIBUTE ERROR: DEVICE DOESN'T HAVE RDEV ATTRIBUTE";
 		*flags |= FLAGS_NEED_RDEV;
@@ -50,15 +55,26 @@ static char *ea_check_unx(struct fnode *fnode, struct ea_unx *unx, int type, int
 	return NULL;
 }
 
-static char *ea_check_symlink(struct fnode *fnode, struct fnode_ea *ea, int type)
+/*
+ * A SYM attribute either holds the target (a short symlink, whose fnode runs
+ * hold the stable inode number and owner) or is empty: the marker of a long
+ * symlink, laid out like a regular file with the target as its data and a
+ * UNX attribute of mode S_IFLNK (struct.h, EA_SYMLINK_MAGIC). The pairing is
+ * checked once all attributes are seen (check_ea_err).
+ */
+static char *ea_check_symlink(struct fnode *fnode, struct fnode_ea *ea, int type, int *flags)
 {
 	__u64 ino;
 	unsigned len = (SPAD2CPU32_LV(&ea->magic) >> FNODE_EA_SIZE_SHIFT) & FNODE_EA_SIZE_MASK_1;
 	unsigned i;
 
-	if (__unlikely(!len)) return "SYMLINK ATTRIBUTE HAS ZERO LENGTH";
-
 	if (__unlikely(!(type & EA_TYPE_FILE))) return "SYMLINK ATTRIBUTE NOT ALLOWED ON HARDLINK";
+
+	if (!len) {
+		*flags |= FLAGS_SYMLINK_MARKER;
+		return NULL;
+	}
+	*flags |= FLAGS_SYMLINK_INLINE;
 
 	for (i = 0; i < len; i++) if (__unlikely(!((char *)(ea + 1))[i])) return "SYMLINK ATTRIBUTE CONTAINS NULL CHARACTER";
 	ino = ((__u64)SPAD2CPU32_LV(&fnode->run10)) |
@@ -121,7 +137,7 @@ static char *check_specific(struct fnode *fnode, struct fnode_ea *ea, int type, 
 			return ea_check_unx(fnode, (struct ea_unx *)ea, type, flags, prealloc);
 		}
 		case EA_SYMLINK_MAGIC & FNODE_EA_MAGIC_MASK: {
-			return ea_check_symlink(fnode, ea, type);
+			return ea_check_symlink(fnode, ea, type, flags);
 		}
 		case EA_RDEV_MAGIC & FNODE_EA_MAGIC_MASK: {
 			return ea_check_rdev(ea, type, flags);
@@ -140,8 +156,10 @@ static char *check_ea_err(struct fnode *fnode, struct fnode_ea *ea_start, unsign
 	__u32 local_prealloc;
 	if (prealloc)
 		*prealloc = 0;
+	unsigned unx_off = 0, unx_size = 0, sym_off = 0, sym_size = 0;
 	again:
 	local_prealloc = 0;
+	flags &= ~(FLAGS_UNX_SYMLINK | FLAGS_SYMLINK_MARKER | FLAGS_SYMLINK_INLINE);
 	off = 0;
 	while (off < ea_size) {
 		char *c;
@@ -167,7 +185,20 @@ static char *check_ea_err(struct fnode *fnode, struct fnode_ea *ea_start, unsign
 		}
 		c = check_specific(fnode, ea, type, &flags, &local_prealloc);
 		if (__unlikely(c != NULL)) return c;
+		if ((SPAD2CPU32_LV(&ea->magic) & FNODE_EA_MAGIC_MASK) == (EA_UNX_MAGIC & FNODE_EA_MAGIC_MASK))
+			unx_off = off, unx_size = rec_size;
+		if ((SPAD2CPU32_LV(&ea->magic) & FNODE_EA_MAGIC_MASK) == (EA_SYMLINK_MAGIC & FNODE_EA_MAGIC_MASK))
+			sym_off = off, sym_size = rec_size;
 		off += rec_size;
+	}
+	/* a long-symlink marker and a symlink UNX mode come together */
+	if (__unlikely(flags & FLAGS_SYMLINK_MARKER) && __unlikely(!(flags & FLAGS_UNX_SYMLINK))) {
+		*err_offset = sym_off, *err_size = sym_size;
+		return "SYMLINK ATTRIBUTE IS EMPTY BUT THE FILE IS NOT A LONG SYMLINK";
+	}
+	if (__unlikely(flags & FLAGS_UNX_SYMLINK) && __unlikely(!(flags & (FLAGS_SYMLINK_MARKER | FLAGS_SYMLINK_INLINE)))) {
+		*err_offset = unx_off, *err_size = unx_size;
+		return "UNX ATTRIBUTE ERROR: SYMLINK MODE WITHOUT A SYMLINK ATTRIBUTE";
 	}
 	if (__unlikely((flags & (FLAGS_NEED_RDEV | FLAGS_HAVE_RDEV)) == FLAGS_NEED_RDEV)) {
 		flags |= FLAGS_DONT_HAVE_RDEV;

@@ -1197,7 +1197,8 @@ static void set_spadfs_file(SPADFNODE *f, struct fnode *fnode, int part)
 	fnode->ctime = CPU2SPAD32(inode_get_ctime(inode(f)).tv_sec);
 	fnode->mtime = CPU2SPAD32(inode_get_mtime(inode(f)).tv_sec);
 	fnode->flags = 0;
-	if (unlikely(S_ISLNK(inode(f)->i_mode))) {
+	/* a short symlink (no UNX attribute) keeps ino/uid/gid in the runs */
+	if (unlikely(S_ISLNK(inode(f)->i_mode)) && !f->ea_unx) {
 		u64 ino;
 		gid_t gid;
 		ino = f->stable_ino;
@@ -1226,7 +1227,20 @@ static void set_spadfs_file(SPADFNODE *f, struct fnode *fnode, int part)
 
 	is = i_size_read(inode(f));
 
-	if (unlikely(is > f->disk_size)) {
+	if (unlikely(!S_ISREG(inode(f)->i_mode))) {
+		/*
+		 * A long symlink (the only non-directory, non-regular fnode
+		 * with data) never records preallocation: both readers reject
+		 * it on a non-file. Without this, the fnode written while
+		 * page_symlink has allocated the block but not yet set i_size
+		 * (0 bytes, one block) encoded that block as preallocation.
+		 * The size is the target length; a block allocated beyond it
+		 * in that brief window is not recorded.
+		 */
+		CPU2SPAD64_LV(&fnode->size[part],
+			      is > f->disk_size ? f->disk_size : is);
+		pa = 0;
+	} else if (unlikely(is > f->disk_size)) {
 		CPU2SPAD64_LV(&fnode->size[part], f->disk_size);
 		pa = 0;
 	} else if (likely(is + (512U << f->fs->sectors_per_disk_block_bits) > f->disk_size)) {

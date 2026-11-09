@@ -340,7 +340,6 @@ Limitations (likely not fixable)
 * Inode numbers may not be unique on 32-bit systems. This is Linux design
   problem and it could be only fixed in kernel. On 64-bit systems, inode
   numbers are unique.
-* Symlink length is limited to 172 characters.
 * No sparse files.
 * There isn't (and likely won't be) any support to open files by inode numbers
   instead of path, for NFS servers.

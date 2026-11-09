@@ -129,7 +129,10 @@ op_10() { truncate -s 1048576 big; }
 op_11() { gen 4096 77 | dd of=big2 bs=4096 seek=2 conv=notrunc status=none; }
 op_12() { rm -r d1; }                     # hl survives with nlink 1
 op_13() { mv d2 d3; }
-N_OPS=13
+# long symlink: the target (over 164 characters) is file data, written
+# before the commit, so no acknowledged state may show a different target
+op_14() { ln -s "$(printf 'long-target-%03d/' $(seq 1 25))end" lsl; }
+N_OPS=14
 
 # syncfs, then record what was acknowledged, then mark the log. Order
 # matters: the mark must follow the commit's flushes in the log.

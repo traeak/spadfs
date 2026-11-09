@@ -81,7 +81,16 @@ static void spadfs_get_ea_unx(struct inode *inode, struct fnode *fnode)
 			    EA_SYMLINK_MAGIC, EA_SYMLINK_MAGIC_MASK);
 	if (unlikely(IS_ERR(lnk)))
 		return;
-	if (unlikely(lnk != NULL) && likely(!inode->i_size)) {
+	/*
+	 * A SYM attribute with a target is a short symlink: the target is in
+	 * the attribute, and the fnode's run fields hold the stable inode
+	 * number and the owner. A zero-length SYM attribute is the marker of a
+	 * long symlink (struct.h, EA_SYMLINK_MAGIC): it is laid out like a
+	 * regular file -- UNX attribute with mode S_IFLNK, target in the data
+	 * blocks -- and is set up on the UNX path below.
+	 */
+	if (unlikely(lnk != NULL) && likely(!inode->i_size) &&
+	    likely(SPAD2CPU32_LV(&lnk->magic) >> FNODE_EA_SIZE_SHIFT)) {
 		inode->i_mode = S_IFLNK | S_IRWXUGO;
 		inode->i_op = &spadfs_symlink_iops;
 		inode->i_size = (SPAD2CPU32_LV(&lnk->magic) >> FNODE_EA_SIZE_SHIFT) &
@@ -122,7 +131,18 @@ static void spadfs_get_ea_unx(struct inode *inode, struct fnode *fnode)
 				mode);
 			return;
 		}
-		if (unlikely(!S_ISREG(mode))) {
+		if (unlikely(S_ISLNK(mode))) {
+			if (unlikely(!lnk)) {
+				spadfs_error(fs, TXFLAGS_EA_ERROR,
+					"UNX extended attribute error on fnode %Lx/%x: symlink mode without a symlink attribute",
+					(unsigned long long)spadfnode(inode)->fnode_block,
+					spadfnode(inode)->fnode_pos);
+				return;
+			}
+			/* long symlink: the target is the file data */
+			inode->i_op = &spadfs_long_symlink_iops;
+			inode_nohighmem(inode);
+		} else if (unlikely(!S_ISREG(mode))) {
 			dev_t rdev = 0;
 			if (likely(S_ISCHR(mode)) || S_ISBLK(mode)) {
 				struct ea_rdev *rd = (struct ea_rdev *)

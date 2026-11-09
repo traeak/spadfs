@@ -116,7 +116,10 @@ are meant to be set by the filesystem driver to deal with specifics of a given
 operating systems. In this implementation, extended attribute 'UNX' contains
 features specific to unix --- mode, uid, gid and file prealloc. Additional
 extended attribute 'UNR' is created on block and char devices and contains rdev
-number. And attribute 'SYM' is created for symlinks.
+number. And attribute 'SYM' is created for symlinks. (spadfs2: a target
+longer than the attribute pool holds -- over 164 characters -- is stored as
+the symlink's file data instead, with an empty 'SYM' attribute as the marker
+and a 'UNX' attribute of mode S_IFLNK.)
 
 Extended attributes are formed and parsed in such a way, that filesystem driver
 and fsck skip unknown attributes, so that it is possible to add new features to

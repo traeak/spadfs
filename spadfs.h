@@ -921,6 +921,7 @@ extern
 const
 #endif
 struct inode_operations spadfs_symlink_iops;
+extern const struct inode_operations spadfs_long_symlink_iops;
 
 /* name.c */
 
