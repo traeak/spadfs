@@ -43,6 +43,9 @@ FIELDS = [
     ("cct_backup_crc",        120, "Q"),
     # second copy of the txblock (one block of its own)
     ("txblock_backup",        128, "Q"),
+    # directory hash key: 16 raw bytes, shown as two little-endian words
+    ("hash_seed_lo",          136, "<Q"),
+    ("hash_seed_hi",          144, "<Q"),
 ]
 
 # struct superblock is little-endian on disk only if byte_sex reads ascending.
@@ -70,7 +73,7 @@ def read_super(path):
         "checksum": sb[19],
     }
     for name, off, fmt in FIELDS:
-        (val,) = struct.unpack_from(endian + fmt, sb, off)
+        (val,) = struct.unpack_from(fmt if fmt[0] in "<>" else endian + fmt, sb, off)
         out[name] = val
     # derived: which layout mkspadfs chose for the cct backup (near the
     # primary at the start, or at the end beside the superblock backup)

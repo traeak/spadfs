@@ -99,6 +99,13 @@ log2(size_of_array_in_dnode)*dnode_tree_depth >= 32), the filesystem finally
 forms a chain of fnodes --- this is ineffective for lookup, but better than to
 give up.
 
+spadfs2: the 32-bit hash is keyed SipHash-2-4 of the case-folded name, with
+a random per-volume key that mkspadfs stores in the superblock (hash_seed;
+see name_hash.h). The original hash (hash * 15 + (c & 0xdf)) spread real names
+evenly but was linear, so names with identical hashes could be crafted at will
+and would force exactly the chains described above; without the key they
+cannot be computed.
+
 Extended attributes
 -------------------
 

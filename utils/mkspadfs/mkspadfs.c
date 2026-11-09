@@ -562,6 +562,19 @@ static void trim_device(void)
 	}
 }
 
+/*
+ * The directory name hash key. It only has to be unpredictable to whoever
+ * chooses file names later; a volume without a good one falls back to
+ * colliding names being computable, so failing loudly beats a weak default.
+ */
+static void random_hash_seed(__u8 *seed)
+{
+	int f = open("/dev/urandom", O_RDONLY);
+	if (f < 0 || read(f, seed, SPADFS_HASH_SEED_SIZE) != SPADFS_HASH_SEED_SIZE)
+		error(1, errno, "\rcannot read /dev/urandom for the directory hash key");
+	close(f);
+}
+
 static void write_super(void)
 {
 	const char *val;
@@ -598,6 +611,8 @@ static void write_super(void)
 	CPU2SPAD64_LV(&sb->cct_backup, cct_backup_sector);
 	CPU2SPAD64_LV(&sb->cct_backup_crc, cct_backup_crc_sector);
 	CPU2SPAD64_LV(&sb->txblock_backup, txblock_backup_sector);
+	/* the directory hash key: random per volume (name_hash.h) */
+	random_hash_seed(sb->hash_seed);
 	CPU2SPAD64_LV(&sb->root, root_fnode_sector);
 	if (unix_names)
 		CPU2SPAD32_LV(&sb->flags_compat_none, SPAD2CPU32_LV(&sb->flags_compat_none) | FLAG_COMPAT_NONE_UNIX_NAMES);

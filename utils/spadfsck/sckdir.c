@@ -418,7 +418,7 @@ do {									\
 			i = 0;
 			goto invl_name;
 		}
-		hash = name_hash(filename);
+		hash = fsck_name_hash(filename);
 		if (__unlikely((hash & d->hash_mask) != (d->hash_val & d->hash_mask))) {
 			log_printf(0, "%s: FILENAME \"%s\" BELONGS TO DIFFERENT HASH PAGE", get_filename(d), escape_name(filename));
 			different_hash_error = 1;

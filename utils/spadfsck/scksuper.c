@@ -10,6 +10,7 @@ __u64 tx_ptr[64];
 __u64 user_ptr[64];
 unsigned block_mask;
 unsigned dnode_hash_bits;
+__u64 name_hash_key[2];
 unsigned dnode_data_size;
 unsigned dnode_page_sectors;
 
@@ -174,6 +175,7 @@ static int test_sb_at_sector(blk_t sector)
 	}
 	block_mask = (1 << super.sectors_per_block_bits) - 1;
 	dnode_hash_bits = SSIZE_BITS + super.sectors_per_page_bits - DNODE_PAGE_ENTRY_BITS - 1;
+	spadfs_hash_key(super.hash_seed, name_hash_key);
 	dnode_data_size = DNODE_PAGE_ENTRY_SIZE << dnode_hash_bits;
 	dnode_page_sectors = DNODE_ENTRY_OFFSET + (dnode_data_size << 1);
 	dnode_page_sectors = (dnode_page_sectors + (1 << SSIZE_BITS << super.sectors_per_block_bits) - 1) & ~((1 << SSIZE_BITS << super.sectors_per_block_bits) - 1);

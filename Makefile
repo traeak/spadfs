@@ -102,7 +102,7 @@ clean : clean-kernel clean-userspace
 
 # Unprivileged test suite: no root, no loop devices, no module loading.
 # Depends only on the userspace tools, so CI can run it without kernel headers.
-test : $(MKFS_TOOL) $(FSCK_TOOL) crc-agreement
+test : $(MKFS_TOOL) $(FSCK_TOOL) crc-agreement hash-agreement
 	bash tests/roundtrip.sh
 	bash tests/detect.sh > tests/BASELINE-checksum-detection.md
 	bash tests/cct_integrity.sh > tests/BASELINE-cct-integrity.md
@@ -125,6 +125,12 @@ crc-agreement : utils/crc32c.o
 		tests/crc_agreement.c utils/crc32c.c
 	@./tests/crc_agreement | tail -3
 	@echo "crc agreement gate passed"
+
+# The directory name hash (name_hash.h) against the SipHash-2-4 test vectors;
+# the driver and both tools compile that same header.
+hash-agreement :
+	$(CC) -Wall -Wextra -I. -o tests/hash_agreement tests/hash_agreement.c
+	@./tests/hash_agreement | tail -1
 
 # NOTE: `test-ref` (side-by-side spadfs/spadfs2 reference comparison, plan task
 # 0.4) is not defined yet -- it needs root for insmod/mount and is deliberately

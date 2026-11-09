@@ -1728,6 +1728,7 @@ read_again:
 
 	fs->txb_sec = SPAD2CPU64_LV(&sb->txblock);
 	fs->txb_backup_sec = SPAD2CPU64_LV(&sb->txblock_backup);
+	spadfs_hash_key(sb->hash_seed, fs->hash_key);
 	fs->apage_index0_sec = SPAD2CPU64_LV(&sb->apage_index[0]);
 	fs->apage_index1_sec = SPAD2CPU64_LV(&sb->apage_index[1]);
 	fs->cct_sec = SPAD2CPU64_LV(&sb->cct);

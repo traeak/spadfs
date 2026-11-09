@@ -254,6 +254,8 @@ extern __u64 user_ptr[64];
 extern char tx_valid;
 extern unsigned block_mask;
 extern unsigned dnode_hash_bits;
+extern __u64 name_hash_key[2];	/* from super.hash_seed (name_hash.h) */
+#define fsck_name_hash(name)	spadfs_name_hash(name_hash_key, (name), strlen(name))
 extern unsigned dnode_data_size;
 extern unsigned dnode_page_sectors;
 extern blk_t total_sectors_allocated;

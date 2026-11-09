@@ -34,7 +34,8 @@ Reported per corpus and hash function:
   coll     names sharing a full 32-bit hash with another name
 
 "ideal" is a cryptographic hash (BLAKE2b, 32 bits): what perfect spreading
-looks like at this capacity, for comparison.
+looks like at this capacity, for comparison. "spadfs2 siphash" is the keyed
+hash spadfs2 adopted (name_hash.h), with a fixed key here.
 """
 
 import argparse
@@ -86,8 +87,53 @@ def h_ideal(b):
                                           digest_size=4).digest(), "little")
 
 
+def _rotl(x, b):
+    return ((x << b) | (x >> (64 - b))) & 0xFFFFFFFFFFFFFFFF
+
+
+def siphash24(key, b, fold=0xDF):
+    """SipHash-2-4 of the folded bytes (name_hash.h, spadfs_siphash24)."""
+    M = 0xFFFFFFFFFFFFFFFF
+    k0, k1 = key
+    v0, v1 = 0x736F6D6570736575 ^ k0, 0x646F72616E646F6D ^ k1
+    v2, v3 = 0x6C7967656E657261 ^ k0, 0x7465646279746573 ^ k1
+    b = bytes(c & fold for c in b)
+
+    def rnd(v0, v1, v2, v3):
+        v0 = (v0 + v1) & M; v1 = _rotl(v1, 13) ^ v0; v0 = _rotl(v0, 32)
+        v2 = (v2 + v3) & M; v3 = _rotl(v3, 16) ^ v2
+        v0 = (v0 + v3) & M; v3 = _rotl(v3, 21) ^ v0
+        v2 = (v2 + v1) & M; v1 = _rotl(v1, 17) ^ v2; v2 = _rotl(v2, 32)
+        return v0, v1, v2, v3
+
+    n = len(b)
+    for i in range(0, n - n % 8, 8):
+        m = int.from_bytes(b[i:i + 8], "little")
+        v3 ^= m
+        v0, v1, v2, v3 = rnd(*rnd(v0, v1, v2, v3))
+        v0 ^= m
+    last = (n << 56) | int.from_bytes(b[n - n % 8:], "little")
+    v3 ^= last
+    v0, v1, v2, v3 = rnd(*rnd(v0, v1, v2, v3))
+    v0 ^= last
+    v2 ^= 0xFF
+    for _ in range(4):
+        v0, v1, v2, v3 = rnd(v0, v1, v2, v3)
+    return v0 ^ v1 ^ v2 ^ v3
+
+
+_KEY = (0x0706050403020100, 0x0F0E0D0C0B0A0908)
+assert siphash24(_KEY, bytes(range(15)), 0xFF) == 0xA129CA6149BE45E5, "siphash vector"
+
+
+def h_spadfs2(b, key=(0x5A17E5EED0C0FFEE, 0x0123456789ABCDEF)):
+    """spadfs_name_hash: keyed SipHash-2-4 of the folded name, folded to 32 bits."""
+    h = siphash24(key, b)
+    return (h ^ (h >> 32)) & MASK
+
+
 HASHES = [("spadfs", h_spadfs), ("spadfs+fmix32", h_spadfs_fmix),
-          ("fnv1a", h_fnv1a), ("ideal", h_ideal)]
+          ("fnv1a", h_fnv1a), ("spadfs2 siphash", h_spadfs2), ("ideal", h_ideal)]
 
 
 # ---------------------------------------------------------------------------

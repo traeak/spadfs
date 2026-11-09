@@ -9,6 +9,7 @@
  * types for the userspace tools, which share this header.
  */
 #include <linux/types.h>
+#include "name_hash.h"
 
 /*	*******************
 	* DATA STRUCTURES *
@@ -261,6 +262,12 @@ struct superblock {
 	 * byte-for-byte copy.
 	 */
 	__u64 txblock_backup;
+
+	/*
+	 * Random key of the directory name hash (name_hash.h), chosen by
+	 * mkspadfs. Raw bytes, read little-endian, independent of byte_sex.
+	 */
+	__u8 hash_seed[SPADFS_HASH_SEED_SIZE];
 };
 
 /*
@@ -957,21 +964,11 @@ struct dnode_page {
 typedef __u32 hash_t;
 #define SPADFS_HASH_BITS	32
 
-static __finline__ hash_t name_hash(const char *name)
-{
-	hash_t hash = 0;
-	while (*name)
-		hash = hash * 15 + (*name++ & 0xdf);
-	return hash;
-}
-
-static __finline__ hash_t name_len_hash(const char *name, int len)
-{
-	hash_t hash = 0;
-	while (len--)
-		hash = hash * 15 + (*name++ & 0xdf);
-	return hash;
-}
+/*
+ * The name hash is keyed SipHash-2-4 of the case-folded name, with the
+ * volume's seed (superblock hash_seed): spadfs_name_hash in name_hash.h,
+ * which explains why the v1.0.22 hash (* 15 + (c & 0xdf)) was replaced.
+ */
 
 /*********
  * ANODE *

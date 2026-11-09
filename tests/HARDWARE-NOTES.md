@@ -242,3 +242,16 @@ cct_crc_mount, crash_logwrites, meta_csum_mount).
 Re-run after the per-device choice (B now picks the near cct backup on
 `/dev/sda1` by itself, txblock backup at the end): both medians around 34 ms
 per commit, within noise, as reported by the operator.
+
+## 2026-11-09: keyed directory hash (Phase 5)
+
+`tests/hashsim.py` found no clustering in the v1.0.22 hash for real or
+synthetic names up to 1M per directory, but the hash is linear and unkeyed:
+16 384 crafted names put a directory into one leaf chain (346 page reads per
+lookup on average, 687 at worst). The hash is now keyed SipHash-2-4 of the
+case-folded name with a random per-volume seed in the superblock
+(`name_hash.h`); in the model the crafted names take 3 page reads. Root runs
+by the operator on 7.3.0_1, all pass: `meta_csum_mount.sh` (a 3000+ name
+directory split by the new hash; spadfsck's placement check agrees with the
+driver for every name), `apage_index_mount.sh` (2400 names), `mount_smoke.sh`,
+`crash_logwrites.sh`, `cc_wrap_mount.sh`.

@@ -392,6 +392,7 @@ struct __spadfs {
 /* Values read from superblock */
 	sector_t txb_sec;
 	sector_t txb_backup_sec;
+	u64 hash_key[2];	/* directory name hash key, from sb->hash_seed */
 	sector_t apage_index0_sec;
 	sector_t apage_index1_sec;
 	sector_t cct_sec;

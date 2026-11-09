@@ -34,12 +34,11 @@ spadfsck) and proven by a real mount; `tests/HARDWARE-NOTES.md` has the runs.
 | Commit ordering (not in the original list) | v1.0.22 wrote the cct with no cache flush before it, so after a power cut the commit could be durable while its metadata was not. A flush now precedes the cct write. Proven with dm-log-writes crash-state replay (`tests/crash_logwrites.sh`). |
 | Commit cost | Two cache flushes per commit (before and after the cct). Measured 44.7 ms per `syncfs` commit on a laptop SATA disk, where one flush costs about 11–12 ms (`tests/commit_cost_ab.sh`). |
 | 2^16 crash-count ceiling | Kept: `cc` indexes the cct, so widening it means a 16 GiB table or a redesign. The kernel warns from 0xff00; `spadfsck --reset-crash-counts` recovers. |
+| Directory hash (Bet 3) | Measured with `tests/hashsim.py`: no clustering up to 1M names, but linear and unkeyed, so crafted names could force one leaf chain (346 page reads per lookup for 16 384 names). Replaced with keyed SipHash-2-4, per-volume random seed in the superblock. |
 | Symlink limit | 164 characters (was 172): the larger fnode block header took 8 bytes from the EA pool. |
 | Kernel support | Floor raised to 6.1 LTS; `linux-compat.h` is 171 lines. |
 
-Still open: the directory hash is unkeyed, so crafted names can force long
-leaf chains (Phase 5 measured it; the distribution itself is fine); sparse
-files and the symlink limit (Phase 6).
+Still open: sparse files and the symlink limit (Phase 6).
 
 ---
 
@@ -304,7 +303,11 @@ cryptographic hash. Anyone who chooses names in a shared directory can do
 this. A finaliser (murmur3 fmix32) does not help -- it is a bijection, so
 equal hashes stay equal -- and an unkeyed replacement such as FNV-1a only
 moves the problem, since its collisions can be computed too. The fix is a
-keyed hash with a per-volume random seed, as ext4 does. Real names collide
+keyed hash with a per-volume random seed, as ext4 does -- which spadfs2 now
+uses: SipHash-2-4 of the case-folded name, keyed by a random 128-bit seed that
+mkspadfs stores in the superblock (`name_hash.h`). In the model it spreads the
+crafted names like any others (3 page reads) and real names like a
+cryptographic hash. Real names collide
 more often than random ones as well (3 960 against 2 256 among 289 128 `/usr`
 names, the 2 256 being case-only pairs every case-folding hash shares), but
 in pairs, which never overflow a leaf.
@@ -473,11 +476,11 @@ pure out-of-tree tax. Upstreaming would delete most of it.
 4. **Hash quality unverified.** `*15` plus low-bits-first is a known-weak
    combination at the level that matters most. Benchmark before trusting.
 
-   *spadfs2: measured.* No clustering for real or synthetic names up to 1M per
-   directory. But the hash is linear and unkeyed, so identical-hash names are
-   trivial to craft: 16 384 of them make lookups in that directory cost
-   hundreds of page reads (see Bet 3). The fix is a keyed hash with a
-   per-volume seed.
+   *spadfs2: measured and fixed.* No clustering for real or synthetic names up
+   to 1M per directory. But the hash was linear and unkeyed, so identical-hash
+   names were trivial to craft: 16 384 of them made lookups in that directory
+   cost hundreds of page reads (see Bet 3). spadfs2 replaced it with keyed
+   SipHash-2-4 and a per-volume random seed.
 5. **No ordered iteration.** Structural, not fixable without a second index.
 6. **2^16 crash-count ceiling.** Real operational cliff; needs fsck to clear.
 
@@ -542,4 +545,5 @@ have.
 *spadfs2:* the checksum is fixed for every metadata structure, the
 counter table is mirrored, the commit point is now correctly ordered behind its
 metadata, and the txblock has a second copy. The hash benchmark found no
-clustering, but an unkeyed, linear hash whose collisions anyone can craft.
+clustering, but a linear, unkeyed hash whose collisions anyone could craft;
+it is now keyed SipHash-2-4 with a per-volume seed.

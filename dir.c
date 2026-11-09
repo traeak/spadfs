@@ -790,7 +790,7 @@ int spadfs_lookup_ino(SPADFNODE *f, const struct qstr *qstr, spadfs_ino_t *ino,
 	c[1] = 0;
 
 	fnode_block = spadfs_find_hash_block(f,
-		name_len_hash((const char *)qstr->name, qstr->len), &bh, &secno, NULL);
+		spadfs_name_hash(f->fs->hash_key, (const char *)qstr->name, qstr->len), &bh, &secno, NULL);
 	if (unlikely(!fnode_block))
 		return 1;
 
@@ -1516,9 +1516,10 @@ bad_tree:
 #define HASH_1		(1 << HASH_1_SHIFT)
 #define HASH_VAL	(HASH_1 - 1)
 
-static int test_hash_bit(char *name, unsigned namelen, unsigned hash_bits)
+static int test_hash_bit(SPADFS *fs, char *name, unsigned namelen,
+			 unsigned hash_bits)
 {
-	hash_t hash = name_len_hash(name, namelen);
+	hash_t hash = spadfs_name_hash(fs->hash_key, name, namelen);
 	return ((hash >> (hash_bits & HASH_VAL)) ^
 		(hash_bits >> HASH_1_SHIFT) ^ 1) & 1;
 }
@@ -1544,7 +1545,7 @@ next_fnode:
 		       used, free, bad_fnode);
 
 used:
-	hash = name_len_hash(FNODE_NAME(fnode), namelen);
+	hash = spadfs_name_hash(fs->hash_key, FNODE_NAME(fnode), namelen);
 	found |= 1 << ((hash >> hash_bits) & 1);
 	if (found == 3) {
 		spadfs_brelse(fs, bh);
@@ -1583,8 +1584,8 @@ bad_fnode:
  */
 
 static int copy_fnodes_to_block(SPADFS *fs, sector_t dst_sec, sector_t src_sec,
-				int (*condition)(char *name, unsigned namelen,
-						 unsigned x),
+				int (*condition)(SPADFS *fs, char *name,
+						 unsigned namelen, unsigned x),
 				unsigned x, int preserve_pos)
 {
 	struct fnode_block *src_block, *dst_block;
@@ -1615,7 +1616,7 @@ next_fnode:
 		      ok, skip, bad_fnode);
 
 ok:
-	if (condition && !condition(FNODE_NAME(src_fnode), namelen, x)) {
+	if (condition && !condition(fs, FNODE_NAME(src_fnode), namelen, x)) {
 skip:
 		if (preserve_pos) {
 	/*
@@ -1736,7 +1737,7 @@ struct fnode *spadfs_add_fnode_to_directory(SPADFNODE *dir,
 
 	if (unlikely(namelen > MAX_NAME_LEN))
 		return ERR_PTR(-ENAMETOOLONG);
-	hash = name_len_hash(name, namelen);
+	hash = spadfs_name_hash(fs->hash_key, name, namelen);
 	BUG_ON(ea_size > FNODE_MAX_EA_SIZE);
 	rsize = FNODE_SIZE(namelen, ea_size);
 	restarts = 0;

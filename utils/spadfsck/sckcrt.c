@@ -75,7 +75,7 @@ static inline void make_dnode_page(struct dnode_page *d, blk_t block)
 static int lookup(blk_t blk, blk_t dir_blk, unsigned dir_offset, const char *filename, struct fnode **result, blk_t *res_page, blk_t *result_fnode, unsigned *result_offset)
 {
 	int r;
-	__u32 hash = name_hash(filename);
+	__u32 hash = fsck_name_hash(filename);
 	unsigned hash_bits_used = 0;
 	struct fnode_block *f;
 	unsigned fp;
