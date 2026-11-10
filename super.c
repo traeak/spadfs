@@ -1563,6 +1563,17 @@ __cold static int spadfs_fill_super(struct super_block *s, void *options, int si
 		s->s_maxbytes = ((u64)512 << 48) - 512;
 	if (s->s_maxbytes > MAX_LFS_FILESIZE)
 		s->s_maxbytes = MAX_LFS_FILESIZE;
+	/*
+	 * fnode times are unsigned 32-bit seconds (struct fnode): declare it,
+	 * so the VFS keeps whole seconds in memory (they would not survive a
+	 * remount otherwise) and clamps times outside 1970-2106 instead of
+	 * letting them wrap (xfstests generic/258, generic/634).
+	 */
+	s->s_time_gran = NSEC_PER_SEC;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,4,0)
+	s->s_time_min = 0;
+	s->s_time_max = U32_MAX;
+#endif
 	memset(fs, 0, sizeof_spadfs);
 	fs->s = s;
 	mutex_init(&fs->alloc_lock);

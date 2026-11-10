@@ -1635,6 +1635,13 @@ int spadfs_file_setattr(struct mnt_idmap *ns, struct dentry *dentry, struct iatt
 	sync_lock_decl
 	struct inode *inode = dentry->d_inode;
 	int r;
+	/*
+	 * A size change updates mtime and ctime. truncate(2) does not ask for
+	 * it (no ATTR_MTIME): the filesystem must, as ext4 and XFS do.
+	 * Decided now, as the expansion below already moves i_size.
+	 */
+	int size_changed = iattr->ia_valid & ATTR_SIZE &&
+			   iattr->ia_size != i_size_read(inode);
 	if (iattr->ia_valid & ATTR_SIZE) {
 		if (unlikely(iattr->ia_size > inode->i_size)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,16)
@@ -1654,6 +1661,12 @@ int spadfs_file_setattr(struct mnt_idmap *ns, struct dentry *dentry, struct iatt
 #endif
 	if (unlikely(r))
 		return r;
+	if (size_changed && !(iattr->ia_valid & ATTR_MTIME)) {
+		time_t t = ktime_get_real_seconds();
+
+		inode_set_mtime(inode, t, 0);
+		inode_set_ctime(inode, t, 0);
+	}
 
 	down_read_sync_lock(spadfnode(inode)->fs);
 	mutex_lock(&spadfnode(inode)->file_lock);

@@ -1043,6 +1043,8 @@ add_fnode_error:
 	/* if (!S_ISDIR(inode(file)->i_mode)) mutex_lock(&spadfnode(new_file)->file_lock); we're already in fs write lock */
 	spadfnode(file)->spadfs_nlink++;
 	spadfs_set_nlink(file);
+	/* the link count is inode metadata: POSIX updates ctime */
+	inode_set_ctime(file, ktime_get_real_seconds(), 0);
 	r = spadfs_refile_fixed_fnode(spadfnode(file), NULL, 0);
 	if (unlikely(r)) {
 		spadfnode(file)->spadfs_nlink--;
@@ -1097,6 +1099,7 @@ int spadfs_unlink_unlocked(SPADFNODE *dir, struct dentry *dentry)
 	    likely(!S_ISDIR(inode(file)->i_mode))) {
 		file->spadfs_nlink--;
 		spadfs_set_nlink(inode(file));
+		inode_set_ctime(inode(file), ktime_get_real_seconds(), 0);
 		r = spadfs_refile_fixed_fnode(file, NULL, 0);
 		return r;
 	}
