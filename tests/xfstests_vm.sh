@@ -33,6 +33,11 @@
 #   TEST_SIZE, SCRATCH_SIZE  device sizes (default 4G, 8G; sparse)
 #   MKFS_OPTIONS  extra mkspadfs2 options, e.g. "--block-size 4096"
 #   TIMEOUT    seconds before the guest is killed (default 36000)
+#   LOGWRITES_SIZE  dm-log-writes device for the tests that need one
+#              (default 8G; sparse)
+#   EXTRA_PKGS Void packages unpacked into the guest only, for tools the
+#              host lacks (default "attr-progs acl-progs quota"; skipped
+#              without xbps-query/xbps-fetch). Cached in WORK/pkgs.
 
 set -euo pipefail
 
@@ -58,7 +63,9 @@ MEM=${MEM:-4G}
 CPUS=${CPUS:-4}
 TEST_SIZE=${TEST_SIZE:-4G}
 SCRATCH_SIZE=${SCRATCH_SIZE:-8G}
+LOGWRITES_SIZE=${LOGWRITES_SIZE:-8G}
 TIMEOUT=${TIMEOUT:-36000}
+EXTRA_PKGS=${EXTRA_PKGS-attr-progs acl-progs quota}
 KERNEL=/boot/vmlinuz-$KVER
 MODDIR=/lib/modules/$KVER
 
@@ -76,6 +83,48 @@ for t in qemu-system-x86_64 busybox cpio zstd; do
 done
 
 mkdir -p "$WORK"
+
+# --- tools the host lacks (getfattr, chacl, setquota, ...): unpacked into
+# WORK/extra-root, which the guest copies over its overlay. The host is
+# untouched. ---
+rm -rf "$WORK/extra-root"
+mkdir -p "$WORK/extra-root" "$WORK/pkgs"
+if [ -n "$EXTRA_PKGS" ] && command -v xbps-query >/dev/null && command -v xbps-fetch >/dev/null; then
+	repo=$(xbps-query -L 2>/dev/null | awk '$2 ~ /^https?:/ { print $2; exit }')
+	arch=$(xbps-uhelper arch 2>/dev/null || uname -m)
+	for p in $EXTRA_PKGS; do
+		v=$(xbps-query -R -p pkgver "$p" 2>/dev/null) || { echo "xfstests_vm: no package $p, skipped" >&2; continue; }
+		f="$WORK/pkgs/$v.$arch.xbps"
+		[ -s "$f" ] || xbps-fetch -o "$f" "$repo/$v.$arch.xbps" >/dev/null 2>&1 \
+			|| { echo "xfstests_vm: could not fetch $v, skipped" >&2; rm -f "$f"; continue; }
+		tar --zstd -xf "$f" -C "$WORK/extra-root" ./usr 2>/dev/null \
+			|| echo "xfstests_vm: could not unpack $v" >&2
+	done
+fi
+
+# --- xfstests knows nothing of spadfs2: these helpers skip unknown
+# filesystems. Patched into the guest's copy of common/rc only. ---
+cat >"$WORK/patch_rc.py" <<'P'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+def insert(anchor, text):
+    # put text before anchor, which must occur exactly once
+    global s
+    if s.count(anchor) != 1:
+        sys.exit("patch_rc: anchor not found once: " + anchor.strip()[:60])
+    s = s.replace(anchor, text + anchor)
+# mkspadfs DEVICE SIZE (bytes); block size by option
+insert('\t*)\n\t\t_notrun "Filesystem $FSTYP not supported in _scratch_mkfs_sized"',
+       '\tspadfs2)\n\t\t${MKFS_PROG} -t $FSTYP -- $MKFS_OPTIONS --block-size $blocksize "$@" $SCRATCH_DEV $fssize\n\t\t;;\n')
+insert('\t*)\n\t\t_notrun "Filesystem $FSTYP not supported in _scratch_mkfs_blocksized"',
+       '\tspadfs2)\n\t\t${MKFS_PROG} -t $FSTYP -- $MKFS_OPTIONS --block-size $blocksize $SCRATCH_DEV\n\t\t;;\n')
+# fnode times are unsigned 32-bit seconds (s_time_min/s_time_max)
+insert('\text2)\n\t\techo "$s32min $s32max"',
+       '\tspadfs2)\n\t\techo "0 $u32max"\n\t\t;;\n')
+open(p, "w").write(s)
+P
+
 rm -rf "$WORK/initramfs"
 mkdir -p "$WORK/initramfs"/{bin,usr/lib,proc,sys,dev,host,rw,new,modules}
 
@@ -178,13 +227,25 @@ W
 chmod +x /usr/bin/mkfs.spadfs2 /usr/bin/fsck.spadfs2
 export MKFS_EXTRA="${MKFS_OPTIONS:-}"
 # the users and groups some tests require (_require_user, _require_group)
+# (shadow entries too: su runs PAM's account check, which needs one. The
+# host's /etc/shadow is unreadable to the user QEMU runs as, so the guest
+# gets its own, holding only root and these users.)
+rm -f /etc/shadow /etc/gshadow
+echo 'root:!:20000::::::' >/etc/shadow
+chmod 600 /etc/shadow
 grep -q '^fsgqa:' /etc/passwd || {
-	echo 'fsgqa:x:1500:1500::/tmp:/bin/sh' >>/etc/passwd
-	echo '123456-fsgqa:x:1501:1500::/tmp:/bin/sh' >>/etc/passwd
-	echo 'fsgqa2:x:1502:1502::/tmp:/bin/sh' >>/etc/passwd
+	for u in fsgqa:1500:1500 123456-fsgqa:1501:1500 fsgqa2:1502:1502; do
+		IFS=: read -r n uid gid <<U
+\$u
+U
+		echo "\$n:x:\$uid:\$gid::/tmp:/bin/sh" >>/etc/passwd
+		echo "\$n:!:20000::::::" >>/etc/shadow
+	done
 	echo 'fsgqa:x:1500:' >>/etc/group
 	echo 'fsgqa2:x:1502:' >>/etc/group
 }
+# tools unpacked on the host (EXTRA_PKGS)
+cp -a /xvm/extra-root/. / 2>/dev/null
 if [ -n "$SCRIPT" ]; then
 	set +x
 	cd "$REPO"
@@ -201,7 +262,9 @@ export TEST_DIR=/mnt/test
 export SCRATCH_DEV=/dev/vdb
 export SCRATCH_MNT=/mnt/scratch
 export RESULT_BASE=/xvm/results
+export LOGWRITES_DEV=/dev/vdc
 C
+python3 /xvm/patch_rc.py "$XFSTESTS/common/rc" || { echo "patching common/rc failed"; off; }
 mkfs.spadfs2 -- /dev/vda
 cd "$XFSTESTS"
 set +x
@@ -221,6 +284,8 @@ EOF
 
 truncate -s "$TEST_SIZE" "$WORK/test.img"
 truncate -s "$SCRATCH_SIZE" "$WORK/scratch.img"
+rm -f "$WORK/logwrites.img"
+truncate -s "$LOGWRITES_SIZE" "$WORK/logwrites.img"
 rm -f "$WORK/check.log" "$WORK/guest.log" "$WORK/dmesg.log"
 
 if [ -n "$SCRIPT" ]; then
@@ -238,6 +303,7 @@ timeout "$TIMEOUT" qemu-system-x86_64 \
 	-virtfs local,path="$WORK",mount_tag=work,security_model=mapped-xattr \
 	-drive file="$WORK/test.img",if=virtio,format=raw,cache=unsafe \
 	-drive file="$WORK/scratch.img",if=virtio,format=raw,cache=unsafe \
+	-drive file="$WORK/logwrites.img",if=virtio,format=raw,cache=unsafe \
 	>"$WORK/console.log" 2>&1 || echo "xfstests_vm: qemu exited $?"
 
 [ -e "$WORK/check.log" ] || { tail -30 "$WORK/console.log"; die "the guest never ran the tests"; }

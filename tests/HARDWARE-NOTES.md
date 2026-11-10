@@ -475,3 +475,54 @@ Open findings, to investigate:
   on the module before the ordered-writeback commit, so not a regression.
 - generic/676: seeking a directory to a position that is not one of its
   cookies makes readdir return EOF.
+
+## 2026-11-10: xfstests baseline (auto group)
+
+Same harness, after closing its gaps: attr/acl/quota tools unpacked into
+the guest only (EXTRA_PKGS), the fsgqa users given shadow entries (su needs
+them), spadfs2 cases patched into the guest's copy of xfstests' sized and
+block-size mkfs helpers and its timestamp-range table, and a third disk for
+dm-log-writes.
+
+`./check -g auto`: 794 tests, 490 not run (mostly reflink, hole punching,
+encryption, shutdown, dedupe, exchange range, verity, POSIX ACLs and disk
+quotas -- both now reach their real check and spadfs has neither), 304 run,
+34 failed. The test device ended consistent (spadfsck clean); no oops, hang
+or lockup.
+
+Found and fixed during the run (tests/fill_mount.sh and
+tests/fragment_mount.sh cover the first two):
+
+| Problem | Fix |
+|---|---|
+| Filling a volume with small files damaged ~1 in 25 volumes: a directory page got 8 sectors where it asked for 16 and used all 16, overlapping a spare apage and later file data ("free ... does overlap with block", dnodes pointing at file contents, lost sectors). spadfs_alloc_blocks retried after freeing the small-file preallocation with the request its failed attempt had halved. In v1.0.22 too: random names hit it 1 fill in 200; the keyed hash spreads sequential names the same way, which made it common (bisected to 7373c9c). | alloc.c retries with the request as made |
+| A write far past EOF on a volume with fragmented free space advanced ~2 pages a second (generic/285 ran over 40 minutes): each page preallocated toward the target one hole per extent, ran out near the end, freed everything and started over | spadfs_do_extend keeps a partial allocation that covers what the caller needs (rounded to a cluster) |
+| fallocate kept setuid/setgid (generic/683, 688) | file_remove_privs, as a write does |
+| setxattr/removexattr left ctime (generic/728) | xattr.c sets it |
+
+Still failing, by design or missing feature:
+
+- No access time: generic/003, 192, 402.
+- No times before 1970: generic/258.
+- No holes or unwritten extents (sparse files, Step 3): generic/092, 094,
+  225, 285, 490, 677, 679, 796, 797. generic/251 and 795 fill the scratch
+  device through fsstress's far-offset writes; generic/013 is excluded for
+  the same reason.
+- Extended attributes share one 168-byte pool and values are at most 255
+  bytes: generic/020, 403, 486, 618.
+- An attribute with an empty value is invalid on disk (GET_XAT rejects a
+  zero value length in all three readers), so setting one is a no-op:
+  generic/062, 611. Allowing it is a format change, left for a decision.
+- No "discard" mount option (log-writes replay mounts with it): 455.
+- No "norecovery" mount option: 537.
+- No RENAME_WHITEOUT, so overlayfs cannot use spadfs as its upper layer:
+  631.
+- stat's inode number is not the in-memory i_ino: 504.
+- mkspadfs overwrites another filesystem without being forced: 740.
+
+Open findings, to investigate (generic/347, 441, 483, 676 as in the quick
+baseline, plus):
+
+- generic/363: fsx with EOF pollution -- bytes written past EOF through a
+  mapping read back after the size grows, where zeros belong. Only the
+  file's own bytes, but wrong.

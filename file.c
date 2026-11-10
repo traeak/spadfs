@@ -1738,6 +1738,18 @@ static long spadfs_file_fallocate(struct file *file, int mode, loff_t offset, lo
 	if (unlikely(mode & ~FALLOC_FL_KEEP_SIZE))
 		return -EOPNOTSUPP;
 	inode_lock_nested(inode, 0);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,2,0)
+	/*
+	 * Like a write, fallocate drops setuid and setgid (and file
+	 * capabilities): otherwise an unprivileged writer could grow a
+	 * privileged binary and keep its bits (xfstests generic/683).
+	 */
+	r = file_remove_privs(file);
+	if (unlikely(r)) {
+		inode_unlock(inode);
+		return r;
+	}
+#endif
 	offset += len;
 	r = 0;
 	if (!(mode & FALLOC_FL_KEEP_SIZE)) {

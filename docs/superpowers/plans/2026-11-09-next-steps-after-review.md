@@ -120,8 +120,12 @@ plus ctime, truncate-time, FITRIM and timestamp-range bugs. 16 still fail:
 missing features (atime, pre-1970 times, unwritten extents and holes,
 norecovery, mkfs overwrite check, stable i_ino) and four open findings
 (347/441 sticky I/O error flags, 483 fallocated space lost at a crash, 676
-readdir at a foreign cookie). Next: the full `-g auto` run, and the
-harness gaps that skip ~75 tests (attr/acl/quota tools, fsgqa, sized mkfs).
+readdir at a foreign cookie). The full `-g auto` run followed (304 of 794
+run, 34 failing; tests/HARDWARE-NOTES.md, "auto group") once the harness
+gaps were closed. It found an upstream allocator bug that damaged ~1 in 25
+filled volumes, a fragmented-space extend that crawled, and fallocate and
+xattr metadata bugs, all fixed. Open: generic/363 (EOF pollution), the four
+findings above, and a decision on empty-valued xattrs (a format change).
 
 The original plan follows.
 

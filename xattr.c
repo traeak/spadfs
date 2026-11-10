@@ -227,6 +227,8 @@ set_just_value:
 	spadfs_memcpy(found + 3 + namelen, value, valuelen);
 
 refile_ret:
+	/* attributes are inode metadata: POSIX updates ctime (generic/728) */
+	inode_set_ctime(inode(f), ktime_get_real_seconds(), 0);
 	r = spadfs_refile_fnode(spadfnode(dentry->d_parent->d_inode), &dentry->d_name, f, ea, ea_size);
 
 ret_r:
