@@ -16,6 +16,8 @@
 #   data     it reads back exactly, before and after a remount
 #   fsck     spadfsck is clean with the deep tree, and again after the file
 #            is deleted (every anode freed: no lost space)
+#   far      with the holes free again, a write 8 GiB past EOF fills them
+#            with zeros and stops with ENOSPC within a minute
 #   log      the kernel logged no spadfs error
 #
 # Usage: sudo bash tests/fragment_mount.sh
@@ -115,8 +117,38 @@ EOF
 		&& ok "bs$bs: it still reads back exactly after a remount" \
 		|| bad "bs$bs: it reads back wrong after a remount" "$(klog_since | grep -i spadfs | tail -3)"
 
-	banner "block size $bs: delete"
+	banner "block size $bs: write far past EOF"
+	# The holes are free again: a write 8 GiB past EOF zero-fills toward it
+	# through them until the volume is full. That used to preallocate
+	# toward the target one hole per extent, fail near the end, free it all
+	# and start over for every page (spadfs_do_extend; ~2 pages a second).
 	rm "$MNT/big"
+	sync -f "$MNT"
+	t0=$(date +%s)
+	timeout 120 python3 - "$MNT/far" >"$WORKDIR/far.txt" 2>&1 <<'EOF'
+import os, sys
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT, 0o644)
+try:
+    os.pwrite(fd, b"x", 8 << 30)
+    print("written")
+except OSError as e:
+    print(e.strerror)
+EOF
+	rc=$?
+	t=$(( $(date +%s) - t0 ))
+	far=$(cat "$WORKDIR/far.txt")
+	if [ "$rc" -eq 0 ] && [ "$far" = "No space left on device" ] && [ "$t" -le 60 ]; then
+		ok "bs$bs: it stops with ENOSPC in ${t} s"
+	else
+		bad "bs$bs: writing far past EOF" "rc=$rc after ${t} s: $far"
+	fi
+	size=$(stat -c %s "$MNT/far")
+	cmp -s -n "$size" "$MNT/far" /dev/zero \
+		&& ok "bs$bs: the $size bytes it reached read back as zeros" \
+		|| bad "bs$bs: the zero-filled part reads back wrong"
+
+	banner "block size $bs: delete"
+	rm "$MNT/far"
 	umount "$MNT"
 	detach
 	"$FSCK" -n -f "$IMG" >"$WORKDIR/fsck.txt" 2>&1 \

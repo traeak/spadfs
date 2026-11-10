@@ -553,7 +553,12 @@ static int spadfs_do_truncate(SPADFNODE *f, loff_t newsize)
 	return spadfs_do_truncate_blocks(f, blks, oldblks);
 }
 
-static int spadfs_do_extend(SPADFNODE *f, loff_t size, unsigned extra_sectors, sector_t resurrect_blks)
+/*
+ * Extend f's allocation to size bytes. If space runs out part way and what
+ * was allocated reaches min_size, keep it and succeed with less: size above
+ * min_size is preallocation, which is a wish, not a need.
+ */
+static int spadfs_do_extend(SPADFNODE *f, loff_t size, loff_t min_size, unsigned extra_sectors, sector_t resurrect_blks)
 {
 	SPADFS *fs = f->fs;
 	struct alloc al;
@@ -724,6 +729,47 @@ set_size_return:
 	return 0;
 
 truncate_ret_r:
+	/*
+	 * Freeing everything here made a preallocation that cannot be met
+	 * cost its whole allocation for nothing, on every retry: a write far
+	 * past EOF on a volume whose free space is in small pieces
+	 * preallocated toward its target, one piece per extent, ran out near
+	 * the end, freed tens of thousands of extents and started over for
+	 * the next page (xfstests generic/285, ~2 pages a second). Keep what
+	 * covers min_size; the rest of the request was preallocation.
+	 */
+	if (r == -ENOSPC) {
+		sector_t keep = blks;
+		sector_t old = spadfs_size_2_sectors(fs, f->disk_size);
+
+		/*
+		 * A file past cluster_threshold is sized in whole clusters
+		 * (FILE_SECTORS): keep only up to one, so the kept size maps
+		 * back to exactly these sectors.
+		 */
+		if ((loff_t)keep << 9 >= fs->cluster_threshold)
+			keep &= ~(sector_t)((1U << fs->sectors_per_cluster_bits) - 1);
+		else
+			keep &= ~(sector_t)((1U << fs->sectors_per_disk_block_bits) - 1);
+		if (keep > old && keep >= spadfs_size_2_sectors(fs, min_size) &&
+		    spadfs_size_2_sectors(fs, (loff_t)keep << 9) == keep) {
+			sector_t missing = newblks - (keep - old);
+
+			if (keep < blks) {
+				r = spadfs_do_truncate_blocks(f, blks, blks - keep);
+				if (unlikely(r))
+					goto unaccount_ret_r;
+			}
+#ifdef SPADFS_QUOTA
+			dquot_free_space_nodirty(inode(f), (loff_t)missing << 9);
+#else
+			inode_sub_bytes(inode(f), (loff_t)missing << 9);
+#endif
+			smp_wmb();
+			spadfs_set_disk_size(f, (loff_t)keep << 9);
+			return 0;
+		}
+	}
 	spadfs_do_truncate_blocks(f, blks,
 				blks - spadfs_size_2_sectors(fs, f->disk_size));
 
@@ -851,7 +897,7 @@ retry:
 
 again_without_prealloc:
 	/*printk("prealloc: %llx + %x = %llx\n", needed_size, prealloc, needed_size + prealloc);*/
-	r = spadfs_do_extend(spadfnode(i), needed_size + prealloc, ts, resurrect_blks);
+	r = spadfs_do_extend(spadfnode(i), needed_size + prealloc, needed_size, ts, resurrect_blks);
 	if (unlikely(r)) {
 		if (likely(r == -ENOSPC)) {
 			if (prealloc && target_blocks_exact != 2) {
@@ -1817,7 +1863,8 @@ static noinline int spadfs_quota_extend(SPADFNODE *f, unsigned bytes)
 	if (i_size >= f->disk_size) {
 		BUG_ON(i_size != f->disk_size);
 
-		r = spadfs_do_extend(f, i_size + (512U << fs->sectors_per_buffer_bits), 0, 0);
+		r = spadfs_do_extend(f, i_size + (512U << fs->sectors_per_buffer_bits),
+				     i_size + (512U << fs->sectors_per_buffer_bits), 0, 0);
 		if (unlikely(r))
 			return r;
 	}
