@@ -426,3 +426,52 @@ with the run before the change for spadfs2:
   full size -- the very write that could expose stale data.
 - 1-writer fsync and commit are unchanged: each fsync there creates a new
   file, which commits anyway, and the commit's extra pass finds nothing.
+
+## 2026-11-09: xfstests baseline (quick group)
+
+`tests/xfstests_vm.sh` runs xfstests (upstream 22348af, 2026-09-20) in a
+throwaway QEMU guest booting the host's 7.3.0_1 kernel -- no root on the
+host. Test and scratch devices are 4 GB and 8 GB virtio disks;
+`tests/xfstests.exclude` skips generic/013 (see there). The same script with
+`--script` runs this tree's root tests in the guest.
+
+`./check -g quick`: 646 tests, 446 not run (reflink 146, hole punch /
+zero range / insert / collapse 42, encryption 22, shutdown 16, exchange
+range 14, dedupe 14, fs-verity 10, NFS export, O_TMPFILE, freeze, DAX;
+plus harness gaps: no attr/chacl/quota tools in the host, the fsgqa user
+cannot run commands, xfstests' sized mkfs does not know spadfs2), 200 run.
+
+Fixed while building the baseline:
+
+| Test | Problem | Fix |
+|---|---|---|
+| generic/465 (and any file in > ~50 pieces) | a full leaf anode got a 31st extent written over its CRC trailer; every reader then rejected it, so badly fragmented files became unreadable | `find_direct` in struct.h: leaf size is ANODE_N_EXTENTS (30), not a stale literal 31; tests/fragment_mount.sh |
+| generic/236 | link and unlink of a hard-linked file left its ctime | namei.c sets ctime before rewriting the fnode |
+| generic/313 | truncate left mtime and ctime | spadfs_file_setattr sets both when the size changes |
+| generic/260, 288 | FITRIM accepted a start past the end and a length below one block; start + len could overflow | ioctl.c returns EINVAL, clamps the end |
+| generic/634 | times past 2106 wrapped (to 2041) | s_time_min/max declared (5.4+), so the VFS clamps; s_time_gran is 1 s |
+| generic/131, 732, 741, 798 | harness: no loopback; mkspadfs progress on stderr | xfstests_vm.sh |
+
+Failing, by design or missing feature:
+
+- generic/003: no access time on disk (fnodes hold ctime and mtime only).
+- generic/258: times before 1970 (the 32-bit time field is unsigned).
+- generic/092, 094, 225, 490, 677, 796, 797: unwritten extents and holes
+  (no sparse files; Step 3 of the plan). Also generic/013, excluded: its
+  writes at offsets up to ~670 MB fill the 4 GB test device without holes.
+- generic/504: stat's inode number (the persistent stable_ino) is not the
+  in-memory i_ino that /proc/locks prints.
+- generic/537: no "norecovery" mount option (there is no log to skip).
+- generic/740: mkspadfs overwrites another filesystem without being forced.
+
+Open findings, to investigate:
+
+- generic/347, 441: after a transient I/O error the volume keeps its
+  TXFLAGS_IO_*_ERROR flags, so `spadfsck -n` fails once the device is
+  healthy again; 441 also gets EIO from fsync on a reopened fd after the
+  error cleared. ext4 marks only metadata errors.
+- generic/483: space preallocated past EOF with fallocate(KEEP_SIZE) and
+  fsynced does not survive a power cut (only the written part does). Also
+  on the module before the ordered-writeback commit, so not a regression.
+- generic/676: seeking a directory to a position that is not one of its
+  cookies makes readdir return EOF.

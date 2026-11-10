@@ -1,0 +1,10 @@
+# xfstests that cannot run usefully on spadfs2, passed to ./check -E by
+# tests/xfstests_vm.sh. Only tests whose failure would break the tests after
+# them belong here; a test that just fails on a missing feature stays in the
+# run and is listed in the baseline (tests/HARDWARE-NOTES.md).
+
+# fsstress writes at offsets up to ~670 MB from 20 processes; without
+# sparse files every one allocates everything below its offset, the 4 GB
+# test device fills, and the test exits before removing its files -- every
+# later test then fails with ENOSPC.
+generic/013

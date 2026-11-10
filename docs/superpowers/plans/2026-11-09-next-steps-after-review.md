@@ -112,6 +112,19 @@ cost with `tests/commit_cost_ab.sh`.
 
 ## Step 2 -- run xfstests' generic group
 
+**Done for the quick group** (tests/HARDWARE-NOTES.md, "xfstests baseline"):
+`tests/xfstests_vm.sh` runs it in a QEMU guest without host root, and runs
+this tree's root tests there too (`--script`). 200 of 646 tests run; the
+run found and fixed an anode bug that made fragmented files unreadable,
+plus ctime, truncate-time, FITRIM and timestamp-range bugs. 16 still fail:
+missing features (atime, pre-1970 times, unwritten extents and holes,
+norecovery, mkfs overwrite check, stable i_ino) and four open findings
+(347/441 sticky I/O error flags, 483 fallocated space lost at a crash, 676
+readdir at a foreign cookie). Next: the full `-g auto` run, and the
+harness gaps that skip ~75 tests (attr/acl/quota tools, fsgqa, sized mkfs).
+
+The original plan follows.
+
 Run in a VM (needs a test and a scratch device, mkfs/fsck hooks for
 `mkspadfs2`/`spadfsck2`, and `FSTYP=spadfs2`). Record the baseline pass/fail
 list in `tests/HARDWARE-NOTES.md`; triage failures into real bugs vs
