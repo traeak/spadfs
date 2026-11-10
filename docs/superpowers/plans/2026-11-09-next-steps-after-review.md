@@ -38,7 +38,7 @@ spadfs2 against ext4, XFS and btrfs, as of `0537a47`:
 1. **Never run under xfstests.** Our suite is strong on format and crash
    ordering, thin on POSIX/API behaviour (rename edge cases, O_DIRECT, mmap,
    xattrs, quota, fsync semantics).
-2. **File data after a crash -- suspected, not yet tested.** A commit
+2. **File data after a crash -- confirmed, then fixed (Step 1).** A commit
    flushes only metadata (`sync_blockdev` on the block device); file data
    goes out through normal writeback, and a file's size reaches its fnode
    when blocks are allocated (`spadfs_extend_file` -> `spadfs_write_file`),
@@ -67,6 +67,28 @@ spadfs2 against ext4, XFS and btrfs, as of `0537a47`:
 ---
 
 ## Step 1 -- settle the data-ordering question
+
+**Done.** Confirmed: `crash_logwrites.sh` op_15 (write a 2 MiB file, fsync
+another) showed the new file holding a previous file's bytes in 12 of 424
+crash states. Fixed without a format change. Each file has an in-memory
+`safe_size`, the bytes known to be on disk. Its fnode never shows more than
+that; anything allocated beyond it is recorded as preallocation.
+`spadfs_make_size_safe` writes and waits for the file's new tail, outside
+every filesystem lock, before the size is raised. Periodic and sync commits
+first do this for every file that grew (`spadfs_write_unsafe_files`). fsync
+does it for its own file only, so it never waits on other files' data.
+Eviction records the full size. One more path had to change: the
+`SPADFS_OPTIMIZE_FSYNC` in-place write into the committed fnode slot is now
+refused when it would make the file show more (`spadfs_in_place_grows`). It
+takes effect without a commit, so the disk could reorder it ahead of the
+data; 4 crash states still failed that way until it was refused. All crash
+states now pass. Cost (tests/HARDWARE-NOTES.md): commit, create/stat/unlink
+and 1-writer fsync unchanged; 8-writer fsync 51 -> 46 ops/s, after an
+fsync fast path that grows a committed size in place once its data is on
+the media (`flushed_size`, numbered flushes in `spadfs_issue_flush`). A
+crash-test op (op_16) covers that path.
+
+The original plan follows.
 
 **Test first.** Extend `tests/crash_logwrites.sh` / `tests/logwrites.py` so
 that, in every replayed crash state, each regular file's content is checked

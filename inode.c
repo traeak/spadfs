@@ -186,6 +186,9 @@ static void spadfs_get_ea_unx(struct inode *inode, struct fnode *fnode)
 			}
 			inode->i_size -= prealloc;
 			spadfnode(inode)->mmu_private = inode->i_size;
+			spadfnode(inode)->safe_size = inode->i_size;
+		spadfnode(inode)->flushed_size = inode->i_size;
+			spadfnode(inode)->flushed_size = inode->i_size;
 		} else {
 			if (unlikely((SPAD2CPU32_LV(&ea->prealloc[0]) |
 				      SPAD2CPU32_LV(&ea->prealloc[1])) != 0)) {
@@ -321,6 +324,9 @@ static int spadfs_read_inode(struct inode *inode, sector_t parent_block, unsigne
 
 		inode->i_mode = (inode->i_mode & ~0111) | S_IFREG;
 		spadfnode(inode)->mmu_private = inode->i_size;
+		/* what is on disk is safe by definition (prealloc adjusts it) */
+		spadfnode(inode)->safe_size = inode->i_size;
+		spadfnode(inode)->flushed_size = inode->i_size;
 		spadfnode(inode)->disk_size = spadfs_roundup_blocksize(fs, inode->i_size);
 		spadfnode(inode)->crash_disk_size = spadfs_roundup_blocksize(fs, other_i_size);
 		inode->i_blocks = spadfs_size_2_sectors(fs, spadfnode(inode)->disk_size);
@@ -424,6 +430,8 @@ struct inode *spadfs_new_inode(struct inode *dir, umode_t mode, time_t ctime,
 	spadfnode(inode)->crash_disk_size = 0;
 	spadfnode(inode)->commit_sequence = fs->commit_sequence;
 	spadfnode(inode)->mmu_private = 0;
+	spadfnode(inode)->safe_size = 0;
+	spadfnode(inode)->flushed_size = 0;
 	spadfs_validate_stable_ino(&spadfnode(inode)->stable_ino, stable_ino);
 	spadfnode(inode)->blk1 = 0;
 	spadfnode(inode)->blk2 = 0;
@@ -530,6 +538,24 @@ void spadfs_evict_inode(struct inode *i)
 		dquot_initialize(i);
 		dquot_free_inode(i);
 #endif
+	}
+
+	/*
+	 * A file leaving memory with its fnode still capped at safe_size
+	 * would look truncated when it is next loaded. The VFS only evicts
+	 * an inode once its data is written and clean, so its full size is
+	 * safe now: record it.
+	 */
+	spadfs_unsafe_list_del(spadfnode(i));
+	if (!want_delete && !is_bad_inode(i) && S_ISREG(i->i_mode) &&
+	    unlikely(spadfnode(i)->safe_size < i_size_read(i))) {
+		fs = spadfnode(i)->fs;
+		down_read_sync_lock(fs);
+		mutex_lock(&spadfnode(i)->file_lock);
+		spadfnode(i)->safe_size = i_size_read(i);
+		spadfs_write_file(spadfnode(i), 0, NULL, NULL);
+		mutex_unlock(&spadfnode(i)->file_lock);
+		up_read_sync_lock(fs);
 	}
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,15,0)

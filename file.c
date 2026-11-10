@@ -536,6 +536,11 @@ static int spadfs_do_truncate(SPADFNODE *f, loff_t newsize)
 {
 	SPADFS *fs = f->fs;
 	sector_t blks, oldblks, nsb;
+
+	if (f->safe_size > newsize)
+		WRITE_ONCE(f->safe_size, newsize);
+	if (f->flushed_size > newsize)
+		f->flushed_size = newsize;
 	blks = spadfs_size_2_sectors(fs, f->disk_size);
 	nsb = spadfs_size_2_sectors(fs, newsize);
 	oldblks = blks - nsb;
@@ -1100,6 +1105,96 @@ static void spadfs_truncate_unlocked(struct inode *i)
 	}
 }
 
+/*
+ * Data ordering (safe_size, struct __spadfnode).
+ *
+ * spadfs_make_size_safe writes and waits for the file's data between its
+ * safe size and its current size, then raises safe_size to the size it saw
+ * before writing; the caller then writes the fnode (spadfs_write_file) so the
+ * next commit records it. Takes no filesystem lock while writing: a commit
+ * holds sync_lock for write, and a writer blocked on it in write_begin holds
+ * the page lock that writeback would wait for.
+ */
+int spadfs_make_size_safe(SPADFNODE *f)
+{
+	loff_t size = i_size_read(inode(f));
+	loff_t safe = READ_ONCE(f->safe_size);
+	int r;
+
+	if (likely(safe >= size))
+		return 0;
+	r = filemap_write_and_wait_range(inode(f)->i_mapping,
+					 safe & PAGE_MASK, size - 1);
+	if (unlikely(r))
+		return r;
+	mutex_lock(&f->file_lock);
+	/* a truncate meanwhile lowers both; never raise past either */
+	if (f->safe_size < size) {
+		WRITE_ONCE(f->safe_size, min(size, i_size_read(inode(f))));
+		/* read after the wait: a flush numbered above it covers the data */
+		f->safe_flush_mark = spadfs_flush_mark(f->fs);
+	}
+	mutex_unlock(&f->file_lock);
+	return 0;
+}
+
+void spadfs_unsafe_list_del(SPADFNODE *f)
+{
+	spin_lock(&f->fs->unsafe_lock);
+	list_del_init(&f->unsafe_entry);
+	spin_unlock(&f->fs->unsafe_lock);
+}
+
+/*
+ * Before a sync or periodic commit: make every file that grew safe and
+ * record its size, so after a crash its data survives up to this commit
+ * (as ext4's data=ordered gives). fsync does this for its own file only, so
+ * an fsync never waits on other files' data; theirs stay at their last safe
+ * size, which is never more than what is on disk.
+ */
+void spadfs_write_unsafe_files(SPADFS *fs)
+{
+	LIST_HEAD(todo);
+
+	spin_lock(&fs->unsafe_lock);
+	list_splice_init(&fs->unsafe_list, &todo);
+	spin_unlock(&fs->unsafe_lock);
+
+	while (1) {
+		sync_lock_decl
+		SPADFNODE *f;
+		struct inode *i;
+
+		spin_lock(&fs->unsafe_lock);
+		if (list_empty(&todo)) {
+			spin_unlock(&fs->unsafe_lock);
+			break;
+		}
+		f = list_first_entry(&todo, SPADFNODE, unsafe_entry);
+		list_del_init(&f->unsafe_entry);
+		/* NULL while the inode is being evicted; evict records it */
+		i = igrab(inode(f));
+		spin_unlock(&fs->unsafe_lock);
+		if (!i)
+			continue;
+		if (likely(!spadfs_make_size_safe(f))) {
+			down_read_sync_lock(fs);
+			mutex_lock(&f->file_lock);
+			/* still short (written to meanwhile) re-adds itself */
+			spadfs_write_file(f, 0, NULL, NULL);
+			mutex_unlock(&f->file_lock);
+			up_read_sync_lock(fs);
+		} else {
+			/* a write error: leave it capped, try again next time */
+			spin_lock(&fs->unsafe_lock);
+			if (list_empty(&f->unsafe_entry))
+				list_add_tail(&f->unsafe_entry, &fs->unsafe_list);
+			spin_unlock(&fs->unsafe_lock);
+		}
+		iput(i);
+	}
+}
+
 void spadfs_truncate(struct inode *i)
 {
 	sync_lock_decl
@@ -1458,11 +1553,16 @@ static int spadfs_file_fsync(struct file *file, loff_t start, loff_t end, int da
 	if (unlikely(r))
 		return r;
 #endif
+	/* the whole new tail, even for a ranged fsync: then record its size */
+	r = spadfs_make_size_safe(f);
+	if (unlikely(r))
+		return r;
 
 	down_read_sync_lock(fs);
 	mutex_lock(&f->file_lock);
 	optimized = 0;
 	bh = NULL;
+again:
 	r = spadfs_write_file(f, datasync, &optimized, &bh);
 	mutex_unlock(&f->file_lock);
 	up_read_sync_lock(fs);
@@ -1473,7 +1573,41 @@ static int spadfs_file_fsync(struct file *file, loff_t start, loff_t end, int da
 		return r;
 	}
 
-	if (likely(optimized)) {
+	if (optimized < 0) {
+		/*
+		 * The fnode is committed with the file's allocation and only
+		 * its size must grow: typical when another writer's commit
+		 * recorded the file before this fsync. Flush the data, then
+		 * the size may grow in place -- two flushes, no commit, and no
+		 * exclusive sync_lock, so parallel fsyncs do not serialize.
+		 */
+		loff_t safe;
+		u64 mark;
+
+		mutex_lock(&f->file_lock);
+		safe = f->safe_size;
+		mark = f->safe_flush_mark;
+		mutex_unlock(&f->file_lock);
+		/*
+		 * Often a flush has already covered it: another writer's
+		 * commit, which this fsync waited behind on sync_lock, flushed
+		 * after the data was written. Then one flush in all suffices.
+		 */
+		if (!spadfs_flushed_since(fs, mark)) {
+			r = spadfs_issue_flush(fs);
+			if (unlikely(r))
+				return r;
+		}
+		down_read_sync_lock(fs);
+		mutex_lock(&f->file_lock);
+		/* a truncate meanwhile lowered safe_size: never pass it */
+		if (f->flushed_size < safe)
+			f->flushed_size = min(safe, f->safe_size);
+		optimized = 2;	/* no second retry: commit if still short */
+		goto again;
+	}
+
+	if (likely(optimized == 1)) {
 		if (likely(bh != NULL)) {
 			r = spadfs_sync_dirty_buffer(bh);
 			spadfs_brelse(fs, bh);
@@ -1679,6 +1813,9 @@ static noinline int spadfs_quota_extend(SPADFNODE *f, unsigned bytes)
 	BUG_ON(i_size > f->disk_size);
 	i_size_write(inode(f), i_size);
 	f->mmu_private = i_size;
+	/* quota data goes through the block device's buffers, which every
+	 * commit writes before its first flush: safe as soon as it is there */
+	f->safe_size = i_size;
 
 	spadfs_write_file(f, 0, NULL, NULL);
 

@@ -1189,6 +1189,30 @@ static void write_ea(SPADFNODE *f, struct fnode *fnode)
 	spadfs_memcpy((void *)ea, f->ea, f->ea_size);
 }
 
+/*
+ * Whether writing f into the fnode's committed slot, in place, would make
+ * it show more of the file than that slot does now. That write takes
+ * effect without a commit, and the data behind the new size is written
+ * but not yet flushed: a crash could keep the fnode and lose the data,
+ * exposing the blocks' previous contents. Growth must go to the current
+ * slot, which the commit's flush orders after the data.
+ */
+static int spadfs_in_place_grows(SPADFNODE *f, struct fnode *fnode, int part)
+{
+	u64 old_vis = SPAD2CPU64_LV(&fnode->size[part]);
+	loff_t vis = i_size_read(inode(f));
+
+	if (!S_ISREG(inode(f)->i_mode))
+		return vis > old_vis;
+	if (likely(f->ea_unx != NULL)) {
+		old_vis -= SPAD2CPU32_LV(&f->ea_unx->prealloc[part]);
+		if (f->safe_size < vis)
+			vis = f->safe_size;
+	}
+	/* up to flushed_size the data is on the media: growing is safe */
+	return (u64)vis > old_vis && vis > f->flushed_size;
+}
+
 static void set_spadfs_file(SPADFNODE *f, struct fnode *fnode, int part)
 {
 	loff_t is, pa;
@@ -1240,18 +1264,44 @@ static void set_spadfs_file(SPADFNODE *f, struct fnode *fnode, int part)
 		CPU2SPAD64_LV(&fnode->size[part],
 			      is > f->disk_size ? f->disk_size : is);
 		pa = 0;
-	} else if (unlikely(is > f->disk_size)) {
-		CPU2SPAD64_LV(&fnode->size[part], f->disk_size);
-		pa = 0;
-	} else if (likely(is + (512U << f->fs->sectors_per_disk_block_bits) > f->disk_size)) {
-		CPU2SPAD64_LV(&fnode->size[part], is);
-		pa = 0;
 	} else {
-		pa = f->disk_size - (512U << f->fs->sectors_per_disk_block_bits) + 1;
-		CPU2SPAD64_LV(&fnode->size[part], pa);
-		pa -= is;
-		if (unlikely((pa & ~0xffffffffULL) != 0))
-			pa = 0xffffffff;
+		/*
+		 * Show no more than the data known to be on disk (safe_size,
+		 * struct __spadfnode). A commit does not write file data, so
+		 * recording i_size here would let a crash expose blocks whose
+		 * new data never arrived -- their previous contents, possibly
+		 * another file's. Whatever is allocated beyond the visible size
+		 * is recorded as preallocation, so the blocks stay the file's.
+		 * Needs the UNX attribute, which holds the prealloc field;
+		 * Linux always creates one for a regular file.
+		 */
+		loff_t vis = is;
+
+		if (likely(f->ea_unx != NULL) && f->safe_size < vis) {
+			vis = f->safe_size;
+			spin_lock(&f->fs->unsafe_lock);
+			if (list_empty(&f->unsafe_entry))
+				list_add_tail(&f->unsafe_entry, &f->fs->unsafe_list);
+			spin_unlock(&f->fs->unsafe_lock);
+		}
+		if (unlikely(vis > f->disk_size)) {
+			CPU2SPAD64_LV(&fnode->size[part], f->disk_size);
+			pa = 0;
+		} else if (likely(vis + (512U << f->fs->sectors_per_disk_block_bits) > f->disk_size)) {
+			CPU2SPAD64_LV(&fnode->size[part], vis);
+			pa = 0;
+		} else {
+			pa = f->disk_size - (512U << f->fs->sectors_per_disk_block_bits) + 1 - vis;
+			/*
+			 * The prealloc field is 32 bits. Beyond that, record
+			 * less of the allocation rather than more of the file:
+			 * after a crash the tail blocks are lost space for fsck
+			 * to reclaim, never readable stale data.
+			 */
+			if (unlikely((pa & ~0xffffffffULL) != 0))
+				pa = 0xffffffff;
+			CPU2SPAD64_LV(&fnode->size[part], vis + pa);
+		}
 	}
 
 	if (likely(f->ea_unx != NULL))
@@ -1264,9 +1314,27 @@ static void set_spadfs_file(SPADFNODE *f, struct fnode *fnode, int part)
 	else
 		want_othersize = f->disk_size;
 	if (unlikely(disk_othersize != want_othersize)) {
-		CPU2SPAD64_LV(&fnode->size[part ^ 1], want_othersize);
+		/*
+		 * The committed version's allocation must stay recorded (a
+		 * crash returns to it), but not its visible size: keep that, so
+		 * this rewrite never makes the committed version show more
+		 * than it did.
+		 */
+		u64 other_vis = SPAD2CPU64_LV(&fnode->size[part ^ 1]);
+		u64 other_pa = 0;
+
+		if (likely(f->ea_unx != NULL) && S_ISREG(inode(f)->i_mode)) {
+			other_vis -= SPAD2CPU32_LV(&f->ea_unx->prealloc[part ^ 1]);
+			if (other_vis < (u64)want_othersize) {
+				other_pa = want_othersize - other_vis;
+				if (unlikely((other_pa & ~0xffffffffULL) != 0))
+					other_pa = 0xffffffff;
+			}
+		}
+		CPU2SPAD64_LV(&fnode->size[part ^ 1],
+			      other_pa ? other_vis + other_pa : (u64)want_othersize);
 		if (likely(f->ea_unx != NULL))
-			CPU2SPAD32_LV(&f->ea_unx->prealloc[part ^ 1], 0);
+			CPU2SPAD32_LV(&f->ea_unx->prealloc[part ^ 1], other_pa);
 	}
 }
 
@@ -1308,9 +1376,23 @@ int spadfs_write_file(SPADFNODE *f, int datasync, int *optimized,
 	old_prealloc = 0;	/* against warning */
 #ifdef SPADFS_OPTIMIZE_FSYNC
 	if (!CC_CURRENT(fs, &fnode->cc, &fnode->txc)) {
-		if (spadfs_roundup_blocksize(fs, SPAD2CPU64_LV(
+		int same_alloc = spadfs_roundup_blocksize(fs, SPAD2CPU64_LV(
 		    &fnode->size[!CC_VALID(fs, &fnode->cc, &fnode->txc)])) ==
-		    f->disk_size) {
+		    f->disk_size;
+		int grows = same_alloc && spadfs_in_place_grows(f, fnode,
+				!CC_VALID(fs, &fnode->cc, &fnode->txc));
+		/*
+		 * Only the size's growth stops the in-place write: an fsync
+		 * (*optimized == 0) can flush the data and retry (it then
+		 * passes 2) instead of committing. Nothing is changed.
+		 */
+		if (unlikely(grows) && optimized != NULL && !*optimized) {
+			*optimized = -1;
+			end_concurrent_atomic_buffer_modify_nodirty(fs, bh);
+			spadfs_brelse(fs, bh);
+			return 0;
+		}
+		if (same_alloc && !grows) {
 			if (unlikely(optimized != NULL)) {
 				if (datasync && f->ea_unx)
 					old_prealloc = SPAD2CPU32_LV(
@@ -1332,7 +1414,7 @@ optimize_it:
 
 #ifdef SPADFS_OPTIMIZE_FSYNC
 	if (unlikely(datasync) && likely(optimized != NULL) &&
-	    likely(*optimized) && likely(!buffer_dirty(bh))) {
+	    likely(*optimized == 1) && likely(!buffer_dirty(bh))) {
 		unsigned current_prealloc = SPAD2CPU32_LV(&f->ea_unx->prealloc[
 				CC_VALID(fs, &fnode->cc, &fnode->txc) ^
 				CC_CURRENT(fs, &fnode->cc, &fnode->txc) ^ 1]);

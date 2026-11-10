@@ -362,8 +362,11 @@ medians:
 - Data throughput equal; XFS's +5% read is most likely file placement.
 - Not covered: directories of 200k+ names (spadfs2's create cost grows with
   directory size, see above), SSD/NVMe, many cores, aged volumes, and equal
-  crash guarantees for file data (spadfs2's data ordering is the open
-  question in docs/superpowers/plans/2026-11-09-next-steps-after-review.md).
+  crash guarantees for file data. These runs predate spadfs2's ordered
+  writeback (Step 1 in
+  docs/superpowers/plans/2026-11-09-next-steps-after-review.md), which
+  makes commits write the data of files that grew first, like ext4's
+  data=ordered; rerun before comparing commit or fsync cost.
 
 Rerun at 200 000 files (`-f 200000`), same command otherwise, medians
 (ext4's spread in brackets where it is wide):
@@ -390,3 +393,36 @@ Rerun at 200 000 files (`-f 200000`), same command otherwise, medians
   allocation it may sit further in or in pieces. Check with filefrag -v.
 - Unlink (3-11x faster than ext4/XFS) and 1-writer fsync leads hold; XFS
   still leads 8-writer fsync by 14%.
+
+## 2026-11-09: ordered writeback (no stale data after a crash)
+
+Same disk and command as above (`bench_ab.sh` against ext4 and XFS, 3
+rounds, 20 000 files), after Step 1 of
+docs/superpowers/plans/2026-11-09-next-steps-after-review.md: a file's
+fnode never shows more than the data known to be written (`safe_size`),
+and periodic/sync commits write the data of files that grew first. Medians,
+with the run before the change for spadfs2:
+
+| Metric | spadfs2 before | spadfs2 after | ext4 | XFS |
+|---|---|---|---|---|
+| commit, syncfs (ms) | 34.54 | 34.74 | 127.54 | 34.45 |
+| create 20k + sync (s) | 1.05 | 1.11 | 1.76 | 1.76 |
+| cold stat 20k (s) | 0.11 | 0.11 | 0.18 | 0.43 |
+| unlink 20k + sync (s) | 0.09 | 0.10 | 0.30 | 1.09 |
+| fsync, 1 writer (ops/s) | 30 | 30 | 22 | 28 |
+| fsync, 8 writers (ops/s) | 51 | 46 | 40 | 58 |
+| seq write (MB/s) | 98.4 | 98.5 | 91.1 | 96.4 |
+| seq read, cold (MB/s) | 103.8 | 103.9 | 108.4 | 109.2 |
+
+- Only 8-writer fsync moved, and it took two steps to get back this far.
+  With the size capped alone it fell to 33-34: a file recorded by another
+  writer's commit at its safe size needed a full commit to grow. Growing it
+  in place after flushing its data (34) did not help -- two flushes either
+  way. Numbering the flushes did (46): a writer usually waits on sync_lock
+  behind another writer's commit, whose flush already covered its data, so
+  one flush suffices again (`spadfs_flushed_since`, `spadfs_file_fsync`).
+- The remaining 10% is the extra fnode write the in-place growth needs:
+  before the change, the other writer's commit had already recorded the
+  full size -- the very write that could expose stale data.
+- 1-writer fsync and commit are unchanged: each fsync there creates a new
+  file, which commits anyway, and the commit's extra pass finds nothing.

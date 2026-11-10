@@ -426,9 +426,21 @@ def judge_fsck(fsck, img, repaired):
 # Oracle: directory tree against the acknowledged manifests
 # ---------------------------------------------------------------------------
 
+FILL_NAME = re.compile(r"\.fill-([0-9a-f]{2})$")
+STALE = "stale data"
+
+
 def walk_tree(root):
     """{relative path: description}, plus read errors. Any error reading a
-    crash state through the kernel is a failure in its own right."""
+    crash state through the kernel is a failure in its own right.
+
+    Stale-data check: a file named *.fill-XX was only ever written with the
+    byte 0xXX, so in ANY crash state -- acknowledged or not -- it may hold
+    only 0xXX and zeros (a tail the data never reached reads as zeros).
+    Any other byte is data the file never had: the previous contents of its
+    blocks (make_image fills the image with a non-zero pattern, so such
+    blocks are recognisable), i.e. a committed size covering blocks whose
+    new data never arrived. Reported as "stale data" in the errors."""
     tree, errors = {}, []
 
     def onerror(e):
@@ -446,10 +458,22 @@ def walk_tree(root):
                     tree[rel] = ["d"]
                 elif stat.S_ISREG(st.st_mode):
                     h = hashlib.sha256()
+                    m = FILL_NAME.search(name)
+                    allowed = bytes([int(m.group(1), 16), 0]) if m else None
+                    off, bad = 0, None
                     with open(p, "rb") as f:
                         for chunk in iter(lambda: f.read(1 << 20), b""):
                             h.update(chunk)
+                            if allowed is not None and bad is None:
+                                stray = chunk.translate(None, allowed)
+                                if stray:
+                                    i = next(k for k, c in enumerate(chunk) if c not in allowed)
+                                    bad = (off + i, chunk[i])
+                            off += len(chunk)
                     tree[rel] = ["f", st.st_size, h.hexdigest(), st.st_nlink]
+                    if bad is not None:
+                        errors.append("%s: %s: byte %02x at offset %d (only %02x or 00 was ever written)"
+                                      % (STALE, rel, bad[1], bad[0], allowed[0]))
                 else:
                     tree[rel] = ["o", stat.S_IFMT(st.st_mode)]
             except OSError as e:
@@ -470,7 +494,7 @@ def load_manifests(d):
 def compare_tree(tree, errors, manifests, acked):
     """Paths the next, unacknowledged operation touches may be in either
     state (or in between); every other path must be exactly as acknowledged."""
-    problems = ["read error: " + e for e in errors]
+    problems = [e if e.startswith(STALE) else "read error: " + e for e in errors]
     if acked >= 0 and acked not in manifests:
         return problems + ["no manifest for ack.%d" % acked]
     exp = manifests.get(acked, {})

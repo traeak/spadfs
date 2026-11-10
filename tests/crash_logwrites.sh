@@ -132,7 +132,41 @@ op_13() { mv d2 d3; }
 # long symlink: the target (over 164 characters) is file data, written
 # before the commit, so no acknowledged state may show a different target
 op_14() { ln -s "$(printf 'long-target-%03d/' $(seq 1 25))end" lsl; }
-N_OPS=14
+# Data ordering: write a file and leave its data in the page cache, then
+# fsync a DIFFERENT file. In spadfs2 that fsync commits the whole
+# transaction, including the first file's new size (recorded when its
+# blocks were allocated), while its data may not be written yet. In every
+# crash state the .fill-4e file may hold only 0x4e or zeros
+# (logwrites.py, walk_tree); anything else is stale data from its blocks'
+# previous contents.
+op_15() {
+	python3 -c 'import sys
+with open(sys.argv[1], "wb") as f:
+    f.write(b"\x4e" * (2 << 20))' order.fill-4e &&
+	python3 -c 'import os, sys
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT, 0o644)
+os.write(fd, b"z")
+os.fsync(fd)
+os.close(fd)' order-other
+}
+# The fsync fast path that grows a committed fnode in place: fsyncing
+# order-other commits the new .fill-5a file at its safe size (0 bytes, the
+# rest recorded as preallocation); fsyncing .fill-5a itself then flushes
+# its data and only then grows the size in place, with no commit
+# (spadfs_file_fsync). Any crash state may show 0x5a or zeros, nothing else.
+op_16() {
+	python3 -c 'import os, sys
+with open(sys.argv[1], "wb") as f:
+    f.write(b"\x5a" * (1 << 20))
+fd = os.open(sys.argv[2], os.O_WRONLY)
+os.write(fd, b"y")
+os.fsync(fd)
+os.close(fd)
+fd = os.open(sys.argv[1], os.O_RDONLY)
+os.fsync(fd)
+os.close(fd)' order2.fill-5a order-other
+}
+N_OPS=16
 
 # syncfs, then record what was acknowledged, then mark the log. Order
 # matters: the mark must follow the commit's flushes in the log.

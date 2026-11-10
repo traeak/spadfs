@@ -394,6 +394,24 @@ def run_all(tmp):
        and not lw.is_finding("crash count table remains untrusted; skipping further checks"),
        "findings (upper case) are told apart from progress and status lines")
 
+    # stale-data check: a *.fill-XX file may hold only 0xXX and zeros
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "good.fill-4e"), "wb") as f:
+            f.write(b"\x4e" * 5000 + b"\x00" * 3000)
+        with open(os.path.join(d, "plain"), "wb") as f:
+            f.write(bytes(range(256)))
+        tree, errs = lw.walk_tree(d)
+        ok(errs == [] and tree["good.fill-4e"][1] == 8000,
+           "a fill file of its byte and a zero tail passes; other files are not checked", str(errs))
+        with open(os.path.join(d, "bad.fill-4e"), "wb") as f:
+            f.write(b"\x4e" * 4096 + b"\xa5\xa6" + b"\x4e" * 10)
+        tree, errs = lw.walk_tree(d)
+        ok(len(errs) == 1 and errs[0].startswith(lw.STALE) and "a5 at offset 4096" in errs[0],
+           "a foreign byte in a fill file is reported as stale data, with its offset", str(errs))
+        probs = lw.compare_tree(tree, errs, {}, -1)
+        ok(any(x.startswith(lw.STALE) for x in probs),
+           "compare_tree reports stale data as such, in any state", str(probs))
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -30,6 +30,7 @@ static void fnode_ctor(void *fn_)
 		inode_init_once(inode(fn));
 		fn->res.len = 0;
 		INIT_LIST_HEAD(&fn->clear_entry);
+		INIT_LIST_HEAD(&fn->unsafe_entry);
 		fn->ea = fn->ea_inline;
 		if (spadfs_unlocked_extent_cache)
 			fn->extent_cache_seq = 0;
@@ -458,9 +459,35 @@ int spadfs_stop_cycles(SPADFS *fs, sector_t key, sector_t (*c)[2],
 	return 0;
 }
 
+u64 spadfs_flush_mark(SPADFS *fs)
+{
+	u64 m;
+
+	spin_lock(&fs->unsafe_lock);
+	m = fs->flush_started;
+	spin_unlock(&fs->unsafe_lock);
+	return m;
+}
+
+/* has a flush that started after spadfs_flush_mark returned mark completed? */
+int spadfs_flushed_since(SPADFS *fs, u64 mark)
+{
+	int r;
+
+	spin_lock(&fs->unsafe_lock);
+	r = fs->flush_done > mark;
+	spin_unlock(&fs->unsafe_lock);
+	return r;
+}
+
 int spadfs_issue_flush(SPADFS *fs)
 {
 	int r;
+	u64 seq;
+
+	spin_lock(&fs->unsafe_lock);
+	seq = ++fs->flush_started;
+	spin_unlock(&fs->unsafe_lock);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,9)
 	r = 0;
 #elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,35)
@@ -476,9 +503,15 @@ int spadfs_issue_flush(SPADFS *fs)
 #endif
 	if (unlikely(r == -EOPNOTSUPP))
 		r = 0;
-	if (unlikely(r))
+	if (unlikely(r)) {
 		spadfs_error(fs, TXFLAGS_IO_WRITE_ERROR, "flush error: %d", r);
-	return r;
+		return r;
+	}
+	spin_lock(&fs->unsafe_lock);
+	if (fs->flush_done < seq)
+		fs->flush_done = seq;
+	spin_unlock(&fs->unsafe_lock);
+	return 0;
 }
 
 void spadfs_tx_block_checksum(struct txblock *tb)
@@ -1207,9 +1240,28 @@ int spadfs_commit(SPADFS *fs)
 	return r;
 }
 
+/* files whose fnode still shows less than their size (safe_size) */
+static int spadfs_has_unsafe_files(SPADFS *fs)
+{
+	int r;
+
+	spin_lock(&fs->unsafe_lock);
+	r = !list_empty(&fs->unsafe_list);
+	spin_unlock(&fs->unsafe_lock);
+	return r;
+}
+
 static int spadfs_sync_fs(struct super_block *s, int wait)
 {
 	SPADFS *fs = spadfs(s);
+	/*
+	 * Ordered: write the data of files that grew and record their sizes
+	 * first. Done even when no metadata is dirty -- a file capped at its
+	 * safe size by an earlier commit has nothing dirty but its data -- and
+	 * recording the sizes is what makes metadata dirty for the commit.
+	 */
+	if (wait && spadfs_has_unsafe_files(fs))
+		spadfs_write_unsafe_files(fs);
 	if (!READ_ONCE(fs->need_background_sync))
 		return 0;
 	else if (!wait)
@@ -1219,7 +1271,7 @@ static int spadfs_sync_fs(struct super_block *s, int wait)
 		return filemap_fdatawrite(s->s_bdev->bd_mapping);
 #endif
 	else
-		return spadfs_commit(spadfs(s));
+		return spadfs_commit(fs);
 }
 
 #ifndef NEW_WORKQUEUE
@@ -1232,6 +1284,8 @@ static void spadfs_sync_work(struct work_struct *w)
 	SPADFS *fs = container_of(w, SPADFS, spadfs_sync_work.work);
 #endif
 	spadfs_reclaim_max_allocation(fs);
+	if (spadfs_has_unsafe_files(fs))
+		spadfs_write_unsafe_files(fs);
 	if (READ_ONCE(fs->need_background_sync)) {
 		spadfs_commit(fs);
 	}
@@ -1525,6 +1579,8 @@ __cold static int spadfs_fill_super(struct super_block *s, void *options, int si
 	mutex_init(&fs->trim_lock);
 
 	spin_lock_init(&fs->clear_lock);
+	spin_lock_init(&fs->unsafe_lock);
+	INIT_LIST_HEAD(&fs->unsafe_list);
 	INIT_LIST_HEAD(&fs->clear_list);
 
 	spadfs_buffer_leaks_init(fs);

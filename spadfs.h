@@ -284,6 +284,23 @@ struct __spadfnode {
 	loff_t crash_disk_size;
 	u64 commit_sequence;
 	loff_t mmu_private;
+	/*
+	 * Bytes of the file known to be on disk: data written and waited for.
+	 * The fnode never shows a regular file larger than this (the rest of
+	 * its allocation is recorded as preallocation, set_spadfs_file), so a
+	 * commit can never expose blocks whose data was not written yet. While
+	 * safe_size < i_size the inode is on fs->unsafe_list.
+	 */
+	loff_t safe_size;
+	/*
+	 * Bytes known to be on the media, not just written: <= safe_size.
+	 * Up to it the size may grow in place in the committed fnode slot
+	 * (spadfs_write_file), with no commit to order it after the data.
+	 */
+	loff_t flushed_size;
+	/* flush_started when the data up to safe_size had been written */
+	u64 safe_flush_mark;
+	struct list_head unsafe_entry;
 	spadfs_ino_t spadfs_ino;
 	spadfs_ino_t stable_ino;
 
@@ -478,6 +495,18 @@ struct __spadfs {
 
 	spinlock_t clear_lock;
 	struct list_head clear_list;
+
+	/* regular files whose safe_size < i_size (struct __spadfnode) */
+	spinlock_t unsafe_lock;
+	struct list_head unsafe_list;
+	/*
+	 * Cache flushes, numbered as they start (spadfs_issue_flush): the
+	 * highest number started, and the highest whose flush completed. Both
+	 * under unsafe_lock. A file's data written before flush number n
+	 * started is on the media once flush_done >= n.
+	 */
+	u64 flush_started;
+	u64 flush_done;
 
 	int buffer_size;
 
@@ -840,6 +869,9 @@ sector_t spadfs_size_2_sectors(SPADFS *fs, loff_t size);
 void spadfs_create_memory_extents(SPADFNODE *f);
 void spadfs_clear_last_block(struct inode *i);
 void spadfs_truncate(struct inode *i);
+int spadfs_make_size_safe(SPADFNODE *f);
+void spadfs_write_unsafe_files(SPADFS *fs);
+void spadfs_unsafe_list_del(SPADFNODE *f);
 void spadfs_delete_file_content(SPADFNODE *f);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,12,0)
 int spadfs_file_setattr(struct dentry *dentry, struct iattr *iattr);
@@ -974,6 +1006,8 @@ __cold void __attribute__ ((__format__ (__printf__, 3, 4))) spadfs_error_(SPADFS
 
 int spadfs_stop_cycles(SPADFS *fs, sector_t key, sector_t (*c)[2], const char *msg);
 int spadfs_issue_flush(SPADFS *fs);
+u64 spadfs_flush_mark(SPADFS *fs);
+int spadfs_flushed_since(SPADFS *fs, u64 mark);
 void spadfs_tx_block_checksum(struct txblock *tb);
 int spadfs_write_tx_block_backup(SPADFS *fs, struct txblock *tb, int sync);
 int spadfs_new_stable_ino(SPADFS *fs, u64 *stable_ino);
