@@ -1934,20 +1934,34 @@ retry_use_prealloc:
 	}
 
 no_prealloc:
+	/*
+	 * A failed attempt leaves *al changed (alloc_blocks_in_different_group
+	 * halves n_sectors before it gives up), so the retry below must start
+	 * from the request as made. It used to retry with the halved one: a
+	 * caller that cannot take less -- a metadata page -- got fewer sectors
+	 * than it asked for, used them all, and the rest went on being free.
+	 * Filling a volume with small files hit it: a directory page overlapped
+	 * a spare apage and later file data (xfstests, tests/fragment_mount.sh).
+	 * Present in v1.0.22.
+	 */
+	{
+		struct alloc orig_al = *al;
 
-	r = spadfs_alloc_blocks_unlocked(fs, al);
-	if (r == -ENOSPC) {
-		if (
+		r = spadfs_alloc_blocks_unlocked(fs, al);
+		if (r == -ENOSPC) {
+			if (
 #ifdef SPADFS_META_PREALLOC
-		    fs->meta_prealloc.n_sectors ||
+			    fs->meta_prealloc.n_sectors ||
 #endif
-		    fs->small_prealloc.n_sectors) {
+			    fs->small_prealloc.n_sectors) {
 #ifdef SPADFS_META_PREALLOC
-			spadfs_prealloc_discard_unlocked(fs, &fs->meta_prealloc);
+				spadfs_prealloc_discard_unlocked(fs, &fs->meta_prealloc);
 #endif
-			spadfs_prealloc_discard_unlocked(fs, &fs->small_prealloc);
+				spadfs_prealloc_discard_unlocked(fs, &fs->small_prealloc);
 
-			r = spadfs_alloc_blocks_unlocked(fs, al);
+				*al = orig_al;
+				r = spadfs_alloc_blocks_unlocked(fs, al);
+			}
 		}
 	}
 
