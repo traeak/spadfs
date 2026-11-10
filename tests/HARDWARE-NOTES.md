@@ -526,4 +526,9 @@ baseline, plus):
 
 - generic/363: fsx with EOF pollution -- bytes written past EOF through a
   mapping read back after the size grows, where zeros belong. Only the
-  file's own bytes, but wrong.
+  file's own bytes, but wrong. Fixed since: cont_write_begin zeroes from
+  mmu_private, which is rounded up to the end of the block holding EOF, so
+  junk stored through mmap between EOF and that block's end survived. A
+  write starting past EOF (truncate up and fallocate come through it too)
+  now zeroes that tail first with block_truncate_page. Fails without the
+  fix, passes with it.

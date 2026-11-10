@@ -124,8 +124,9 @@ readdir at a foreign cookie). The full `-g auto` run followed (304 of 794
 run, 34 failing; tests/HARDWARE-NOTES.md, "auto group") once the harness
 gaps were closed. It found an upstream allocator bug that damaged ~1 in 25
 filled volumes, a fragmented-space extend that crawled, and fallocate and
-xattr metadata bugs, all fixed. Open: generic/363 (EOF pollution), the four
-findings above. Empty-valued xattrs are now allowed (generic/062, 611).
+xattr metadata bugs, all fixed; so are generic/363 (EOF pollution) and
+generic/062, 611 (empty xattr values are now allowed). Open: the four
+findings above.
 
 The original plan follows.
 

@@ -1400,6 +1400,18 @@ static int spadfs_write_begin(
 	int r;
 
 	*pagep = NULL;
+	/*
+	 * cont_write_begin zeroes the gap from mmu_private, which is rounded
+	 * up to the end of the block holding EOF. A store through mmap can
+	 * leave junk in that block past EOF; zero it before the file grows
+	 * over it (truncate up and fallocate come here too, through
+	 * generic_cont_expand_simple; xfstests generic/363).
+	 */
+	if (pos > i_size_read(mapping->host)) {
+		r = block_truncate_page(mapping, i_size_read(mapping->host), spadfs_get_block);
+		if (unlikely(r))
+			return r;
+	}
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5,19,0)
 	r = cont_write_begin(file, mapping, pos, len, flags, pagep, fsdata, spadfs_get_block, &f->mmu_private);
 #else
