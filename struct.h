@@ -1028,12 +1028,24 @@ struct anode {
 	__u32 trailer_crc;
 };
 
+/*
+ * How many leading entries of an anode are direct extents; the rest point to
+ * child anodes. Root: 20 direct, then indirect pointers whose index gives the
+ * tree depth (update_depth), with the last slot shared with the name
+ * (ANODE_ROOT_NAME). Leaf: all ANODE_N_EXTENTS. Interior: one.
+ *
+ * The leaf count was a literal 31 when ANODE_N_EXTENTS was 31. When the CRC
+ * trailer took the 31st slot it stayed 31, so a full leaf anode got a 31st
+ * extent written over the trailer, and every reader then rejected it
+ * ("anode ... has 31 valid extents"): a file fragmented past one leaf became
+ * unreadable. Found by xfstests generic/465 on an aged volume.
+ */
 static __finline__ int find_direct(int depth_now, int depth_total)
 {
 	if (likely(!depth_now))
-		return 20;	/* 20 -- direct; 10 -- indirect; 1 -- name */
+		return 20;
 	if (depth_now == depth_total)
-		return 31;
+		return ANODE_N_EXTENTS;
 	return 1;
 }
 
