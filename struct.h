@@ -789,7 +789,8 @@ static __finline__ __u8 *GET_XAT(__u8 *xat, unsigned xat_size, int mode, int typ
 		if (unlikely(xat_size < 3))
 			return GET_XAT_ERROR;
 
-		if (unlikely(!xat[2]))
+		/* names are never empty; values may be (generic/062) */
+		if (unlikely(!xat[1]))
 			return GET_XAT_ERROR;
 
 		this_size = 3 + xat[1] + xat[2];

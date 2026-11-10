@@ -125,7 +125,7 @@ run, 34 failing; tests/HARDWARE-NOTES.md, "auto group") once the harness
 gaps were closed. It found an upstream allocator bug that damaged ~1 in 25
 filled volumes, a fragmented-space extend that crawled, and fallocate and
 xattr metadata bugs, all fixed. Open: generic/363 (EOF pollution), the four
-findings above, and a decision on empty-valued xattrs (a format change).
+findings above. Empty-valued xattrs are now allowed (generic/062, 611).
 
 The original plan follows.
 

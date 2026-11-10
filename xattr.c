@@ -103,6 +103,8 @@ static int spadfs_xattr_set(
 #endif
 
 	unsigned namelen = strlen(name);
+	/* the VFS passes value == NULL only to remove; "" is an empty value */
+	int remove = !value;
 
 	u8 *ea;
 	unsigned ea_size;
@@ -185,7 +187,7 @@ static int spadfs_xattr_set(
 			r = -EEXIST;
 			goto ret_r;
 		}
-		if (valuelen == found[2])
+		if (!remove && valuelen == found[2])
 			goto set_just_value;
 		end = (u8 *)(xat + 1) + xat_size;
 		shrink = 3 + found[1] + found[2];
@@ -195,7 +197,7 @@ static int spadfs_xattr_set(
 			goto ret_r;
 		}
 		xat_size -= shrink;
-		if (!valuelen) {
+		if (remove) {
 			if (!xat_size) {
 				REMOVE_EA(ea, &ea_size, xat);
 			}
@@ -207,7 +209,7 @@ static int spadfs_xattr_set(
 			r = -ENODATA;
 			goto ret_r;
 		}
-		if (!valuelen) {
+		if (remove) {
 			r = 0;
 			goto ret_r;
 		}

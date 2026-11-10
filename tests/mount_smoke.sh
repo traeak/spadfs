@@ -148,6 +148,24 @@ setfattr -n user.test -v hello "$MNT/file1.txt" 2>/dev/null \
 	&& [ "$(getfattr -n user.test --only-values "$MNT/file1.txt" 2>/dev/null)" = "hello" ] \
 	&& ok "xattr set/get" || warn "xattr unsupported here (skipped, not a failure)"
 
+# an empty value is a value, not a removal (generic/062); fsck in section 4
+# must accept it on disk and section 6 must read it back after a remount
+xattr_empty() {
+	python3 - "$1" "$2" <<'PY'
+import os, sys
+p, op = sys.argv[1], sys.argv[2]
+try:
+    if op == "set":
+        os.setxattr(p, "user.empty", b"")
+    v = os.getxattr(p, "user.empty")
+    print("empty" if v == b"" and "user.empty" in os.listxattr(p) else "value %r" % v)
+except OSError as e:
+    print(e.strerror)
+PY
+}
+r=$(xattr_empty "$MNT/file2.txt" set)
+[ "$r" = empty ] && ok "empty xattr value set/get/list" || bad "empty xattr value" "$r"
+
 sync
 
 # ---------------------------------------------------------------------------
@@ -225,6 +243,9 @@ if mount -t spadfs2 "$LOOP" "$MNT" 2>/dev/null; then
 	ok "remount of kernel-written volume succeeds"
 	if [ "$(cat "$MNT/file1.txt" 2>/dev/null)" = "spadfs2 test payload 1" ]; then
 		ok "data survives unmount/remount intact"
+		r=$(xattr_empty "$MNT/file2.txt" get)
+		[ "$r" = empty ] && ok "empty xattr value survives remount" \
+			|| bad "empty xattr value after remount" "$r"
 	else
 		bad "data did not survive remount"
 	fi

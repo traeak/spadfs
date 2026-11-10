@@ -510,9 +510,10 @@ Still failing, by design or missing feature:
   the same reason.
 - Extended attributes share one 168-byte pool and values are at most 255
   bytes: generic/020, 403, 486, 618.
-- An attribute with an empty value is invalid on disk (GET_XAT rejects a
-  zero value length in all three readers), so setting one is a no-op:
-  generic/062, 611. Allowing it is a format change, left for a decision.
+- An attribute with an empty value was invalid on disk (GET_XAT rejected a
+  zero value length in all three readers), so setting one was a no-op:
+  generic/062, 611. Fixed since: empty values are allowed and an empty
+  name is the invalid case; both tests pass.
 - No "discard" mount option (log-writes replay mounts with it): 455.
 - No "norecovery" mount option: 537.
 - No RENAME_WHITEOUT, so overlayfs cannot use spadfs as its upper layer:
